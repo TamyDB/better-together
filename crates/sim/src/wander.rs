@@ -13,8 +13,12 @@ const ARRIVE_DIST: f32 = 0.01;
 pub(crate) enum Wander {
     #[default]
     Start,
-    Waiting { ticks_left: u32 },
-    Walking { target: Vec2 },
+    Waiting {
+        ticks_left: u32,
+    },
+    Walking {
+        target: Vec2,
+    },
 }
 
 impl Wander {
@@ -22,7 +26,9 @@ impl Wander {
     pub fn next_input(&mut self, pos: Vec2, rng: &mut Rng) -> (i8, i8) {
         match *self {
             Wander::Start => {
-                *self = Wander::Waiting { ticks_left: rng.range_u32(IDLE_MIN_TICKS, IDLE_MAX_TICKS + 1) };
+                *self = Wander::Waiting {
+                    ticks_left: rng.range_u32(IDLE_MIN_TICKS, IDLE_MAX_TICKS + 1),
+                };
                 (0, 0)
             }
             Wander::Waiting { ticks_left: 0 } => {
@@ -34,11 +40,19 @@ impl Wander {
                 self.next_input(pos, rng)
             }
             Wander::Waiting { ticks_left } => {
-                *self = Wander::Waiting { ticks_left: ticks_left - 1 };
+                *self = Wander::Waiting {
+                    ticks_left: ticks_left - 1,
+                };
                 (0, 0)
             }
             Wander::Walking { target } => {
-                let axis = |d: f32| if d.abs() <= ARRIVE_DIST { 0 } else { d.signum() as i8 };
+                let axis = |d: f32| {
+                    if d.abs() <= ARRIVE_DIST {
+                        0
+                    } else {
+                        d.signum() as i8
+                    }
+                };
                 let dir = (axis(target.x - pos.x), axis(target.y - pos.y));
                 if dir == (0, 0) {
                     *self = Wander::Start;

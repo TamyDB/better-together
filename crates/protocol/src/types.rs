@@ -14,7 +14,12 @@ pub enum Animal {
 }
 
 impl Animal {
-    pub const ALL: [Animal; 4] = [Animal::Duck, Animal::Capybara, Animal::Horse, Animal::Chicken];
+    pub const ALL: [Animal; 4] = [
+        Animal::Duck,
+        Animal::Capybara,
+        Animal::Horse,
+        Animal::Chicken,
+    ];
 }
 
 /// Posição normalizada em [0,1] relativa ao monitor primário do Host.

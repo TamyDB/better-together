@@ -1,7 +1,7 @@
 use dm_protocol::{AnimState, Facing, InputFrame, PetState};
 
-use crate::wander::Wander;
 use crate::consts::{DT, EDGE_MARGIN, RUN_SPEED, WALK_SPEED};
+use crate::wander::Wander;
 
 pub(crate) struct Pet {
     pub state: PetState,

@@ -28,7 +28,12 @@ pub struct World {
 impl World {
     /// `aspect` = largura / altura do monitor do Host (> 0).
     pub fn new(aspect: f32, seed: u64) -> World {
-        World { aspect, tick: 0, pets: BTreeMap::new(), rng: Rng::new(seed) }
+        World {
+            aspect,
+            tick: 0,
+            pets: BTreeMap::new(),
+            rng: Rng::new(seed),
+        }
     }
 
     pub fn spawn(&mut self, id: PlayerId, animal: Animal, pos: Vec2) -> Result<(), SimError> {
@@ -49,7 +54,16 @@ impl World {
             anim: AnimState::Idle,
             last_input_seq: 0,
         };
-        self.pets.insert(id, Pet { state, input: None, input_tick: 0, autonomous: false, wander: Wander::default() });
+        self.pets.insert(
+            id,
+            Pet {
+                state,
+                input: None,
+                input_tick: 0,
+                autonomous: false,
+                wander: Wander::default(),
+            },
+        );
         Ok(())
     }
 
@@ -59,7 +73,9 @@ impl World {
 
     /// Registra o input mais recente; `seq` repetido ou antigo é ignorado.
     pub fn apply_input(&mut self, id: PlayerId, input: InputFrame) {
-        let Some(pet) = self.pets.get_mut(&id) else { return };
+        let Some(pet) = self.pets.get_mut(&id) else {
+            return;
+        };
         if input.seq <= pet.state.last_input_seq {
             return;
         }
@@ -92,7 +108,10 @@ impl World {
     }
 
     pub fn snapshot(&self) -> Snapshot {
-        Snapshot { tick: self.tick, pets: self.pets.values().map(|p| p.state.clone()).collect() }
+        Snapshot {
+            tick: self.tick,
+            pets: self.pets.values().map(|p| p.state.clone()).collect(),
+        }
     }
 }
 
@@ -108,7 +127,12 @@ mod tests {
     }
 
     fn input(seq: u32, move_x: i8, move_y: i8) -> InputFrame {
-        InputFrame { seq, move_x, move_y, run: false }
+        InputFrame {
+            seq,
+            move_x,
+            move_y,
+            run: false,
+        }
     }
 
     /// Simula um remetente a 60 Hz: reaplica o mesmo input a cada tick.
@@ -120,7 +144,13 @@ mod tests {
     }
 
     fn pos(world: &World, id: PlayerId) -> Vec2 {
-        world.snapshot().pets.into_iter().find(|p| p.id == id).unwrap().pos
+        world
+            .snapshot()
+            .pets
+            .into_iter()
+            .find(|p| p.id == id)
+            .unwrap()
+            .pos
     }
 
     #[test]
@@ -129,12 +159,21 @@ mod tests {
         for (i, a) in Animal::ALL.iter().enumerate() {
             w.spawn(PlayerId(i as u8), *a, v(0.5, 0.5)).unwrap();
         }
-        assert_eq!(w.spawn(PlayerId(9), Animal::Duck, v(0.5, 0.5)), Err(SimError::Full));
+        assert_eq!(
+            w.spawn(PlayerId(9), Animal::Duck, v(0.5, 0.5)),
+            Err(SimError::Full)
+        );
 
         let mut w = World::new(1.0, 1);
         w.spawn(PlayerId(0), Animal::Duck, v(0.5, 0.5)).unwrap();
-        assert_eq!(w.spawn(PlayerId(0), Animal::Horse, v(0.5, 0.5)), Err(SimError::PlayerExists));
-        assert_eq!(w.spawn(PlayerId(1), Animal::Duck, v(0.5, 0.5)), Err(SimError::AnimalTaken));
+        assert_eq!(
+            w.spawn(PlayerId(0), Animal::Horse, v(0.5, 0.5)),
+            Err(SimError::PlayerExists)
+        );
+        assert_eq!(
+            w.spawn(PlayerId(1), Animal::Duck, v(0.5, 0.5)),
+            Err(SimError::AnimalTaken)
+        );
     }
 
     #[test]
@@ -162,7 +201,12 @@ mod tests {
         }
         let dx = pos(&w, PlayerId(0)).x - 0.2;
         let dy = pos(&w, PlayerId(1)).y - 0.2;
-        assert!((dx * aspect - dy).abs() < EPS, "dx*aspect={} dy={}", dx * aspect, dy);
+        assert!(
+            (dx * aspect - dy).abs() < EPS,
+            "dx*aspect={} dy={}",
+            dx * aspect,
+            dy
+        );
     }
 
     #[test]
@@ -246,7 +290,10 @@ mod autonomous_tests {
             w.step();
             let p = w.snapshot().pets[0].pos;
             moved |= p != v(0.5, 0.5);
-            assert!((0.04..=0.96).contains(&p.x) && (0.04..=0.96).contains(&p.y), "{p:?}");
+            assert!(
+                (0.04..=0.96).contains(&p.x) && (0.04..=0.96).contains(&p.y),
+                "{p:?}"
+            );
         }
         assert!(moved);
     }
@@ -261,7 +308,15 @@ mod autonomous_tests {
             for t in 0..1000u32 {
                 if t % 7 == 0 {
                     let m = ((t / 7) % 3) as i8 - 1;
-                    w.apply_input(PlayerId(1), InputFrame { seq: t + 1, move_x: m, move_y: -m, run: t % 2 == 0 });
+                    w.apply_input(
+                        PlayerId(1),
+                        InputFrame {
+                            seq: t + 1,
+                            move_x: m,
+                            move_y: -m,
+                            run: t % 2 == 0,
+                        },
+                    );
                 }
                 w.step();
             }
@@ -275,7 +330,15 @@ mod autonomous_tests {
         let mut w = World::new(1.0, 5);
         w.spawn(PlayerId(0), Animal::Duck, v(0.5, 0.5)).unwrap();
         w.set_autonomous(PlayerId(0), true);
-        w.apply_input(PlayerId(0), InputFrame { seq: 1, move_x: -1, move_y: 0, run: false });
+        w.apply_input(
+            PlayerId(0),
+            InputFrame {
+                seq: 1,
+                move_x: -1,
+                move_y: 0,
+                run: false,
+            },
+        );
         w.step();
         let p = &w.snapshot().pets[0];
         assert_eq!(p.facing, Facing::Left);
