@@ -251,5 +251,5 @@ A CI roda tudo isso no **Ubuntu** e no **Windows**, onde também faz o build do 
 
 <div align="center">
 <br />
-<sub>Feito com 🦆 e Rust · licença MIT</sub>
+<sub>Feito com 🦆 e Rust · <a href="LICENSE">licença MIT</a></sub>
 </div>
