@@ -1,0 +1,13 @@
+[package]
+name = "dm-protocol"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+bincode.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
