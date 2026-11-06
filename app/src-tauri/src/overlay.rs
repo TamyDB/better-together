@@ -11,7 +11,7 @@ const FALLBACK_ASPECT: f32 = 16.0 / 9.0;
 /// Dev (`DM_DEV_WINDOW=1`): janela comum 1280×720 focável, para testar no Linux.
 pub fn setup_overlay(app: &AppHandle, dev_window: bool) -> tauri::Result<f32> {
     let builder = WebviewWindowBuilder::new(app, OVERLAY_LABEL, WebviewUrl::default())
-        .title("Desktop Multiplayer");
+        .title("Better Together");
 
     if dev_window {
         builder

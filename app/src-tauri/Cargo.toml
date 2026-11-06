@@ -1,5 +1,5 @@
 [package]
-name = "desktop-multiplayer"
+name = "better-together"
 edition.workspace = true
 version.workspace = true
 license.workspace = true

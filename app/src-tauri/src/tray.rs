@@ -19,7 +19,7 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&toggle, &quit])?;
 
     let mut tray = TrayIconBuilder::new()
-        .tooltip("Desktop Multiplayer")
+        .tooltip("Better Together")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "toggle" => app.state::<Arc<PetMode>>().toggle(),
