@@ -73,11 +73,88 @@ impl KeyState {
     }
 }
 
-/// O hook só engole teclas do modo bichinho, com ele ligado e sem Ctrl/Alt
-/// (assim Alt+Tab e a própria hotkey continuam chegando ao sistema).
+/// O que o hook faz com um evento de tecla.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn should_swallow(pet_mode: bool, key: Option<Key>, ctrl_or_alt_down: bool) -> bool {
-    pet_mode && key.is_some() && !ctrl_or_alt_down
+pub struct HookDecision {
+    /// Não repassar ao sistema.
+    pub swallow: bool,
+    /// Entregar ao `PetMode`.
+    pub forward: bool,
+}
+
+fn swallow_bit(key: Key) -> u8 {
+    match key {
+        Key::W => 1,
+        Key::A => 1 << 1,
+        Key::S => 1 << 2,
+        Key::D => 1 << 3,
+        Key::Esc => 1 << 4,
+        Key::Shift => 0,
+    }
+}
+
+/// Decide um evento do hook. `swallowed` guarda quais teclas tiveram o key-down engolido.
+///
+/// - Key-down só é engolido com o modo ligado e sem Ctrl/Alt/Win (Alt+Tab etc. funcionam).
+/// - Key-up só é engolido se o key-down correspondente foi; senão o sistema ficaria com a
+///   tecla "presa".
+/// - Shift nunca é engolido (para não quebrar Ctrl+Shift+P e Shift+Alt+Tab); o pet só o lê.
+/// - Key-ups sempre vão ao `PetMode`, para o movimento não ficar preso.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn filter_key(
+    swallowed: u8,
+    pet_mode: bool,
+    key: Option<Key>,
+    down: bool,
+    modifier_down: bool,
+) -> (u8, HookDecision) {
+    let Some(key) = key else {
+        return (
+            swallowed,
+            HookDecision {
+                swallow: false,
+                forward: false,
+            },
+        );
+    };
+    let bit = swallow_bit(key);
+    if !down {
+        let swallow = swallowed & bit != 0;
+        return (
+            swallowed & !bit,
+            HookDecision {
+                swallow,
+                forward: true,
+            },
+        );
+    }
+    if key == Key::Shift {
+        return (
+            swallowed,
+            HookDecision {
+                swallow: false,
+                forward: pet_mode,
+            },
+        );
+    }
+    if pet_mode && !modifier_down {
+        (
+            swallowed | bit,
+            HookDecision {
+                swallow: true,
+                forward: true,
+            },
+        )
+    } else {
+        (
+            swallowed,
+            HookDecision {
+                swallow: false,
+                forward: false,
+            },
+        )
+    }
 }
 
 #[cfg(test)]
@@ -118,11 +195,47 @@ mod tests {
         assert_eq!(Key::from_code("KeyZ"), None);
     }
 
+    fn on(state: u8, key: Key, down: bool, modifier: bool) -> (u8, HookDecision) {
+        filter_key(state, true, Some(key), down, modifier)
+    }
+
     #[test]
     fn swallow_rules() {
-        assert!(!should_swallow(false, Some(Key::W), false));
-        assert!(should_swallow(true, Some(Key::W), false));
-        assert!(!should_swallow(true, Some(Key::W), true));
-        assert!(!should_swallow(true, None, false));
+        assert!(!filter_key(0, false, Some(Key::W), true, false).1.swallow);
+        assert!(on(0, Key::W, true, false).1.swallow);
+        assert!(!on(0, Key::W, true, true).1.swallow);
+        assert!(!filter_key(0, true, None, true, false).1.swallow);
+        assert!(on(0, Key::Esc, true, false).1.swallow);
+    }
+
+    #[test]
+    fn up_passes_when_its_down_passed() {
+        // Ctrl+W com o modo ligado: o W-down passa; o W-up (Ctrl já solto) também precisa passar.
+        let (s, d) = on(0, Key::W, true, true);
+        assert!(!d.swallow);
+        assert!(!on(s, Key::W, false, false).1.swallow);
+    }
+
+    #[test]
+    fn up_swallowed_when_its_down_was() {
+        let (s, d) = on(0, Key::D, true, false);
+        assert!(d.swallow && d.forward);
+        let (s, d) = on(s, Key::D, false, true);
+        assert!(d.swallow && d.forward);
+        assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn shift_never_swallowed_but_forwarded() {
+        let (s, d) = on(0, Key::Shift, true, false);
+        assert!(!d.swallow && d.forward);
+        let (_, d) = on(s, Key::Shift, false, false);
+        assert!(!d.swallow && d.forward);
+    }
+
+    #[test]
+    fn ups_always_forwarded() {
+        // Solta com modificador ainda atualiza o estado do pet (não "prende" o movimento).
+        assert!(on(0, Key::A, false, true).1.forward);
     }
 }

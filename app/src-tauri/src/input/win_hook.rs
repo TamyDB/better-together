@@ -1,22 +1,27 @@
 //! Hook de teclado low-level do Windows: lê WASD/Shift/Esc no modo bichinho
 //! sem que essas teclas cheguem aos apps do Host.
 
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage, HC_ACTION,
     HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN,
 };
 
-use super::keys::{should_swallow, Key};
+use super::keys::{filter_key, Key};
 use crate::pet_mode::PetMode;
 
 // O callback do hook é `extern "system"` e não recebe contexto; o estado vive aqui.
 static MODE: OnceLock<Arc<PetMode>> = OnceLock::new();
+// Teclas cujo key-down foi engolido (ver `filter_key`). Só a thread do hook escreve.
+static SWALLOWED: AtomicU8 = AtomicU8::new(0);
 
 /// Instala o hook numa thread dedicada com o loop de mensagens que ele exige.
 pub fn install_keyboard_hook(mode: Arc<PetMode>) {
@@ -27,7 +32,7 @@ pub fn install_keyboard_hook(mode: Arc<PetMode>) {
     thread::Builder::new()
         .name("keyboard-hook".into())
         .spawn(|| unsafe {
-            let module = GetModuleHandleW(None).ok().map(|m| HINSTANCE(m.0));
+            let module: HINSTANCE = GetModuleHandleW(None).map(Into::into).unwrap_or_default();
             if let Err(e) = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), module, 0) {
                 log::error!("falha ao instalar o hook de teclado: {e}");
                 return;
@@ -48,19 +53,23 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
             let key = Key::from_vk(kb.vkCode as u16);
             let down = matches!(wparam.0 as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+            let pressed = |vk: VIRTUAL_KEY| GetAsyncKeyState(vk.0 as i32) < 0;
             let modifier =
-                GetAsyncKeyState(VK_CONTROL.0 as i32) < 0 || GetAsyncKeyState(VK_MENU.0 as i32) < 0;
+                pressed(VK_CONTROL) || pressed(VK_MENU) || pressed(VK_LWIN) || pressed(VK_RWIN);
 
-            if let Some(k) = key {
-                if should_swallow(mode.is_on(), key, modifier) {
-                    mode.on_key(k, down);
-                    return LRESULT(1);
-                }
-                // Soltar a tecla sempre atualiza o estado, para não "prender" o movimento
-                // quando ela foi solta com Ctrl/Alt pressionado.
-                if !down {
-                    mode.on_key(k, false);
-                }
+            let (state, decision) = filter_key(
+                SWALLOWED.load(Ordering::Relaxed),
+                mode.is_on(),
+                key,
+                down,
+                modifier,
+            );
+            SWALLOWED.store(state, Ordering::Relaxed);
+            if let (Some(k), true) = (key, decision.forward) {
+                mode.on_key(k, down);
+            }
+            if decision.swallow {
+                return LRESULT(1);
             }
         }
     }
