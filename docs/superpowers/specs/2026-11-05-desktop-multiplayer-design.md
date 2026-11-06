@@ -24,7 +24,7 @@ O repositório `desktop-multiplayer` só tem o `CLAUDE.md` com a ideia inicial: 
 crates/protocol/   Mensagens serde+bincode, PROTOCOL_VERSION, tipos compartilhados
 crates/sim/        Simulação pura e determinística a 60 Hz (física, animais, emotes, estado). Sem I/O
 crates/mischief/   trait DesktopEffector + Win32Effector (windows-rs) + FakeEffector; HostPolicy
-crates/signaling/  axum + WebSocket: salas "PATO-4821", relay de SDP/ICE, expiração 1h, rate limit
+crates/signaling/  axum + WebSocket: salas "PATO-4821", relay de SDP/ICE, código válido enquanto a sessão existir, rate limit
 app/src-tauri/     Papel Host/Convidado, loop da sim, hotkeys globais, janelas, IPC
 app/ui/            TS + Vite: lobby, seleção de animal, chat, WebRTC, render dos sprites em canvas
 assets/            Sprite sheets (placeholders)
@@ -61,7 +61,7 @@ Fluxo: `MischiefRequest` → `HostPolicy` (permissão, cooldown, alvo válido) �
 - Botão de pânico com hotkey global (`Ctrl+Alt+F12`): congela travessuras, esconde a overlay e solta janela e cursor.
 - Permissões por travessura (para todos ou por jogador), kick, trancar sala, pausa automática quando o Host entra em tela cheia.
 - Convidados nunca recebem títulos de janela nem nomes de processo. O Host valida o esquema de toda mensagem e aplica rate limit por canal.
-- Código da sala com cerca de 20 bits, expira em 1h, rate limit por IP na sinalização. DTLS do WebRTC para criptografia ponta a ponta.
+- Código da sala com cerca de 20 bits, válido enquanto a sessão existir (o Host conectado). Rate limit por IP na sinalização, que é a defesa contra quem tenta adivinhar códigos. DTLS do WebRTC para criptografia ponta a ponta.
 
 ### Erros e resiliência
 - Convidado cai: o bichinho "dorme" por 30 s esperando a reconexão, depois é removido.
@@ -77,7 +77,7 @@ Fluxo: `MischiefRequest` → `HostPolicy` (permissão, cooldown, alvo válido) �
 ## Testes
 - `protocol`/`sim`: unitários + proptest (round-trip, determinismo, reconciliação). Rodam no Linux.
 - `mischief`: `HostPolicy` testada com `FakeEffector`. `Win32Effector` com integração só no Windows.
-- `signaling`: integração com axum (criar, entrar, expirar, rate limit).
+- `signaling`: integração com axum (criar, entrar, encerrar a sala, rate limit).
 - E2E: modo `--loopback` (Host + 3 convidados falsos em uma máquina).
 - CI: GitHub Actions `ubuntu-latest` (crates puros) + `windows-latest` (Win32 + build Tauri). O desenvolvimento é no Fedora, então os testes manuais precisam de VM ou PC Windows.
 
