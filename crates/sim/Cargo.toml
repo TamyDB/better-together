@@ -1,0 +1,9 @@
+[package]
+name = "dm-sim"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+dm-protocol.workspace = true
+thiserror.workspace = true

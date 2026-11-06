@@ -1,0 +1,255 @@
+<div align="center">
+
+<img src="app/src-tauri/icons/128x128.png" alt="Better Together" width="112" />
+
+# Better Together
+
+**Seus amigos, como bichinhos, passeando pelo seu desktop.**
+
+Um app para Windows no estilo *Desktop Goose*, só que multiplayer: até 4 amigos
+dividem a área de trabalho do Host, bagunçam janelas, mandam emotes e conversam.
+
+[![CI](https://github.com/TamyDB/better-together/actions/workflows/ci.yml/badge.svg)](https://github.com/TamyDB/better-together/actions/workflows/ci.yml)
+![Plataforma](https://img.shields.io/badge/plataforma-Windows%2010%2B-0078D4)
+![Rust](https://img.shields.io/badge/Rust-stable-DEA584?logo=rust&logoColor=white)
+![Tauri](https://img.shields.io/badge/Tauri-2-24C8D8?logo=tauri&logoColor=white)
+![Status](https://img.shields.io/badge/status-M1%20·%20funda%C3%A7%C3%A3o-F2C230)
+
+[O jogo](#-o-jogo) · [Instalação](#-instalação) · [Detalhes técnicos](#-detalhes-técnicos) · [Roadmap](#-roadmap)
+
+</div>
+
+<!-- TODO: substituir por um GIF do pato vagando sobre o desktop quando houver build no Windows -->
+
+---
+
+## 🦆 O jogo
+
+Uma pessoa abre uma **sala** e vira o **Host**. Os amigos entram com o código da sala
+(algo como `PATO-4821`) e aparecem como bichinhos **andando por cima da área de trabalho
+dela**, por cima das janelas, ícones e barra de tarefas. Cada amigo vê a tela do Host
+ao vivo e controla o próprio bichinho pelo teclado.
+
+### Escolha seu bicho
+
+| | Animal | |
+|:---:|:---|:---|
+| 🦆 | **Pato** | o clássico encrenqueiro |
+| 🌿 | **Capivara** | zen até a página dois |
+| 🐴 | **Cavalo** | grande demais para a barra de tarefas |
+| 🐔 | **Galinha** | caos em forma de penas |
+
+Cada animal só pode ser escolhido uma vez por sala. São no máximo 4 jogadores: o Host
+e mais 3 amigos.
+
+### O que dá para fazer
+
+- **Passear e correr** pelo desktop do Host.
+- **Emotes e chat** com a turma.
+- **Travessuras leves**, no espírito do ganso:
+  - 🪟 **arrastar janelas** pela barra de título;
+  - 🖱️ **puxar o cursor** do Host por alguns segundos;
+  - 🐾 **deixar coisas na tela**: pegadas, bilhetinhos e figurinhas que somem sozinhos.
+
+### O Host está no controle
+
+O desktop é de quem hospeda, então ninguém clica nem digita nos apps do Host. Só existem
+as travessuras acima, e todas têm limite de tempo e de quantidade. O Host pode:
+
+- desligar cada travessura, para todos ou para um jogador só;
+- expulsar jogadores e trancar a sala;
+- apertar o **botão de pânico** (`Ctrl+Alt+F12`), que congela tudo na hora.
+
+Os convidados nunca recebem títulos de janelas nem nomes de programas do Host.
+
+> [!NOTE]
+> **Estado atual: marco M1 (fundação).** Por enquanto há um bichinho local por cima do
+> desktop. Ele vagueia sozinho e o Host pode assumir o controle pelo teclado. Rede, vídeo,
+> chat e travessuras chegam nos próximos marcos (veja o [Roadmap](#-roadmap)).
+
+---
+
+## 📦 Instalação
+
+> [!IMPORTANT]
+> Ainda não existe instalador pronto, que chega no marco M6. Por enquanto, o app é
+> compilado a partir do código-fonte.
+
+### Pré-requisitos
+
+| Ferramenta | Versão | Observação |
+|:---|:---|:---|
+| [Rust](https://rustup.rs) | stable | com `rustfmt` e `clippy` |
+| [Node.js](https://nodejs.org) | 22+ | |
+| [pnpm](https://pnpm.io) | 12+ | |
+| WebView2 | — | já vem no Windows 10/11 atualizado |
+
+<details>
+<summary><b>Desenvolvendo no Linux?</b> Dependências de sistema do Tauri</summary>
+
+<br />
+
+O app é feito para Windows, mas a simulação, os testes e o **modo dev** rodam no Linux.
+
+**Fedora**
+```sh
+sudo dnf install webkit2gtk4.1-devel libsoup3-devel javascriptcoregtk4.1-devel \
+  librsvg2-devel rustfmt clippy
+```
+
+**Ubuntu / Debian**
+```sh
+sudo apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev \
+  librsvg2-dev libayatana-appindicator3-dev
+```
+
+</details>
+
+### Rodando
+
+```sh
+git clone git@github.com:TamyDB/better-together.git
+cd better-together
+pnpm --dir app install
+
+# Windows: overlay transparente por cima do desktop
+pnpm --dir app tauri dev
+
+# Linux/dev: janela comum 1280×720, focável
+DM_DEV_WINDOW=1 pnpm --dir app tauri dev
+```
+
+Para gerar o executável, sem instalador, rode `pnpm --dir app tauri build --no-bundle`.
+
+### Controles
+
+| Tecla | Ação |
+|:---|:---|
+| <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd> | liga/desliga o **modo bichinho** |
+| <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> | andar |
+| <kbd>Shift</kbd> | correr |
+| <kbd>Esc</kbd> | sair do modo bichinho |
+| Ícone na bandeja | alternar o modo / sair do app |
+
+Fora do modo bichinho, o teclado funciona normalmente e o bichinho vagueia sozinho.
+Atalhos com <kbd>Ctrl</kbd>, <kbd>Alt</kbd> ou <kbd>Win</kbd> sempre chegam ao Windows.
+
+---
+
+## 🛠 Detalhes técnicos
+
+### Arquitetura
+
+```mermaid
+flowchart LR
+    subgraph Host["PC do Host (Windows)"]
+        direction TB
+        SIM["dm-sim<br/>simulação 60 Hz<br/>(autoridade)"]
+        MIS["mischief<br/>Win32: janelas, cursor"]
+        OVL["Overlay transparente<br/>click-through"]
+        SIM --> OVL
+        SIM --> MIS
+    end
+
+    subgraph Guest["PC do Convidado ×3"]
+        direction TB
+        VIEW["Viewer<br/>vídeo + sprites"]
+        PRED["dm-sim<br/>predição local"]
+        PRED --> VIEW
+    end
+
+    SIG[("Sinalização<br/>salas · SDP/ICE")]
+
+    Guest -- "inputs 60 Hz" --> Host
+    Host -- "snapshots 20 Hz<br/>+ vídeo 720p" --> Guest
+    Host -.-> SIG
+    Guest -.-> SIG
+```
+
+- **O Host é a autoridade.** Ele simula o mundo e os convidados mandam só *inputs*.
+  Cada convidado prevê o próprio bichinho e se corrige quando chega um snapshot.
+- **Os bichinhos não fazem parte do vídeo.** A overlay do Host fica fora da captura
+  (`WDA_EXCLUDEFROMCAPTURE`), e cada convidado desenha os sprites por cima do vídeo,
+  então eles continuam nítidos e respondem rápido.
+- **Rede P2P em estrela** via WebRTC, com um servidor leve só para criar as salas e
+  um TURN de reserva para quando a conexão direta falhar.
+
+### Stack
+
+| Camada | Tecnologia |
+|:---|:---|
+| Núcleo, regras, Win32 | Rust · [`windows`](https://crates.io/crates/windows) |
+| App e janelas | [Tauri 2](https://tauri.app) |
+| UI, render, WebRTC | TypeScript · Vite · Canvas 2D · WebView2 |
+| Protocolo | `serde` + `bincode` |
+| Testes | `cargo test` · `proptest` · Vitest |
+
+<details>
+<summary><b>Estrutura do repositório</b></summary>
+
+<br />
+
+```
+crates/
+  protocol/     tipos, mensagens, codec bincode, versão do protocolo
+  sim/          simulação pura e determinística (sem I/O, relógio ou RNG global)
+app/
+  src-tauri/    app Tauri: loop da sim, overlay, modo bichinho, hook de teclado, bandeja
+  ui/           TypeScript: render dos bichinhos em canvas
+docs/superpowers/
+  specs/        spec de design
+  plans/        planos de implementação por marco
+```
+
+</details>
+
+<details>
+<summary><b>Decisões de projeto que valem conhecer</b></summary>
+
+<br />
+
+- **Coordenadas normalizadas** em `[0,1]` do monitor primário do Host. Funcionam em
+  qualquer resolução e escala de DPI. A velocidade é medida em alturas de tela por
+  segundo, então o movimento é igual em telas 16:9, 21:9 ou verticais.
+- **Timestep fixo** de 60 Hz, com no máximo 5 ticks de recuperação. Depois de uma
+  travada, o bichinho não se teletransporta.
+- **Input que para de chegar** expira em 30 ticks (0,5 s). Uma tecla "presa" por
+  evento perdido não faz o bichinho andar para sempre.
+- **Hook de teclado (`WH_KEYBOARD_LL`)** só engole WASD/Esc com o modo ligado e sem
+  modificadores. Ele só engole o soltar de uma tecla se também engoliu o apertar, e
+  nunca engole o Shift, para nenhuma tecla ficar presa no sistema.
+
+</details>
+
+### Testes
+
+```sh
+cargo test --workspace                              # protocolo, simulação, app
+cargo clippy --workspace --all-targets -- -D warnings
+pnpm --dir app test                                 # render (Vitest)
+```
+
+A CI roda tudo isso no **Ubuntu** e no **Windows**, onde também faz o build do app.
+
+### Documentação
+
+- 📐 [Spec de design](docs/superpowers/specs/2026-11-05-desktop-multiplayer-design.md)
+- 🗺️ [Plano do M1](docs/superpowers/plans/2026-11-05-m1-fundacao.md)
+
+---
+
+## 🗺 Roadmap
+
+| Marco | Conteúdo | Status |
+|:---:|:---|:---:|
+| **M1** | Fundação: protocolo, simulação, overlay, modo bichinho | ✅ |
+| **M2** | Rede: salas, WebRTC, lobby com escolha de animal, 4 bichinhos | ⏳ |
+| **M3** | Vídeo: stream da tela do Host para os convidados | ⏳ |
+| **M4** | Social: chat e emotes | ⏳ |
+| **M5** | Travessuras, painel de permissões e botão de pânico | ⏳ |
+| **M6** | Distribuição: instalador, auto-update, servidor de salas | ⏳ |
+
+<div align="center">
+<br />
+<sub>Feito com 🦆 e Rust · licença MIT</sub>
+</div>

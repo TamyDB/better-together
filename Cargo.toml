@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/protocol", "crates/sim", "app/src-tauri"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+dm-protocol = { path = "crates/protocol" }
+dm-sim = { path = "crates/sim" }
+serde = { version = "1", features = ["derive"] }
+bincode = { version = "2", features = ["serde"] }
+thiserror = "2"
+proptest = "1"
