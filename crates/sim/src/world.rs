@@ -4,6 +4,8 @@ use dm_protocol::{AnimState, Animal, Facing, InputFrame, PetState, PlayerId, Sna
 
 use crate::consts::{INPUT_TIMEOUT_TICKS, MAX_PLAYERS};
 use crate::pet::Pet;
+use crate::rng::Rng;
+use crate::wander::Wander;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SimError {
@@ -20,13 +22,13 @@ pub struct World {
     aspect: f32,
     tick: u32,
     pets: BTreeMap<PlayerId, Pet>,
+    rng: Rng,
 }
 
 impl World {
     /// `aspect` = largura / altura do monitor do Host (> 0).
     pub fn new(aspect: f32, seed: u64) -> World {
-        let _ = seed;
-        World { aspect, tick: 0, pets: BTreeMap::new() }
+        World { aspect, tick: 0, pets: BTreeMap::new(), rng: Rng::new(seed) }
     }
 
     pub fn spawn(&mut self, id: PlayerId, animal: Animal, pos: Vec2) -> Result<(), SimError> {
@@ -47,7 +49,7 @@ impl World {
             anim: AnimState::Idle,
             last_input_seq: 0,
         };
-        self.pets.insert(id, Pet { state, input: None, input_tick: 0, autonomous: false });
+        self.pets.insert(id, Pet { state, input: None, input_tick: 0, autonomous: false, wander: Wander::default() });
         Ok(())
     }
 
@@ -79,6 +81,10 @@ impl World {
                 .filter(|_| self.tick - pet.input_tick <= INPUT_TIMEOUT_TICKS);
             match fresh {
                 Some(i) => pet.advance(i.move_x, i.move_y, i.run, self.aspect),
+                None if pet.autonomous => {
+                    let (x, y) = pet.wander.next_input(pet.state.pos, &mut self.rng);
+                    pet.advance(x, y, false, self.aspect);
+                }
                 None => pet.advance(0, 0, false, self.aspect),
             }
         }
@@ -219,5 +225,60 @@ mod tests {
         w.step();
         w.step();
         assert_eq!(w.snapshot().tick, 2);
+    }
+}
+
+#[cfg(test)]
+mod autonomous_tests {
+    use super::*;
+
+    fn v(x: f32, y: f32) -> Vec2 {
+        Vec2 { x, y }
+    }
+
+    #[test]
+    fn wander_eventually_moves_and_stays_in_bounds() {
+        let mut w = World::new(16.0 / 9.0, 3);
+        w.spawn(PlayerId(0), Animal::Duck, v(0.5, 0.5)).unwrap();
+        w.set_autonomous(PlayerId(0), true);
+        let mut moved = false;
+        for _ in 0..3600 {
+            w.step();
+            let p = w.snapshot().pets[0].pos;
+            moved |= p != v(0.5, 0.5);
+            assert!((0.04..=0.96).contains(&p.x) && (0.04..=0.96).contains(&p.y), "{p:?}");
+        }
+        assert!(moved);
+    }
+
+    #[test]
+    fn world_deterministic() {
+        let run = || {
+            let mut w = World::new(16.0 / 9.0, 7);
+            w.spawn(PlayerId(0), Animal::Duck, v(0.5, 0.8)).unwrap();
+            w.spawn(PlayerId(1), Animal::Chicken, v(0.3, 0.3)).unwrap();
+            w.set_autonomous(PlayerId(0), true);
+            for t in 0..1000u32 {
+                if t % 7 == 0 {
+                    let m = ((t / 7) % 3) as i8 - 1;
+                    w.apply_input(PlayerId(1), InputFrame { seq: t + 1, move_x: m, move_y: -m, run: t % 2 == 0 });
+                }
+                w.step();
+            }
+            w.snapshot()
+        };
+        assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn input_overrides_wander() {
+        let mut w = World::new(1.0, 5);
+        w.spawn(PlayerId(0), Animal::Duck, v(0.5, 0.5)).unwrap();
+        w.set_autonomous(PlayerId(0), true);
+        w.apply_input(PlayerId(0), InputFrame { seq: 1, move_x: -1, move_y: 0, run: false });
+        w.step();
+        let p = &w.snapshot().pets[0];
+        assert_eq!(p.facing, Facing::Left);
+        assert_eq!(p.anim, AnimState::Walk);
     }
 }

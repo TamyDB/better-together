@@ -1,5 +1,6 @@
 use dm_protocol::{AnimState, Facing, InputFrame, PetState};
 
+use crate::wander::Wander;
 use crate::consts::{DT, EDGE_MARGIN, RUN_SPEED, WALK_SPEED};
 
 pub(crate) struct Pet {
@@ -7,6 +8,7 @@ pub(crate) struct Pet {
     pub input: Option<InputFrame>,
     pub input_tick: u32,
     pub autonomous: bool,
+    pub wander: Wander,
 }
 
 impl Pet {
