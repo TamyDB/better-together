@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol"]
+members = ["crates/protocol", "crates/sim"]
 
 [workspace.package]
 edition = "2021"
@@ -9,6 +9,7 @@ license = "MIT"
 
 [workspace.dependencies]
 dm-protocol = { path = "crates/protocol" }
+dm-sim = { path = "crates/sim" }
 serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde"] }
 thiserror = "2"
