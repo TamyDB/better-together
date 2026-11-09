@@ -31,3 +31,5 @@ O desenvolvimento é no Fedora. Os crates puros são testados no Linux; Win32, o
 
 ### Marcos
 M1 Fundação → M2 Rede → M3 Vídeo → M4 Social → M5 Travessuras → M6 Distribuição. Cada marco tem seu próprio plano em `docs/superpowers/plans/`.
+
+**Marco atual:** M2 implementado; E2E manual (Host + convidado com janelas) pendente. Próximo: M3.

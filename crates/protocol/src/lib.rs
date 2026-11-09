@@ -2,11 +2,15 @@
 
 mod codec;
 mod messages;
+mod names;
 mod types;
 
 pub use codec::{check_version, decode, encode, ProtocolError};
 pub use messages::{GuestMsg, HostMsg, RejectReason};
-pub use types::{AnimState, Animal, Facing, InputFrame, PetState, PlayerId, Snapshot, Vec2};
+pub use names::{sanitize_name, MAX_NAME_CHARS};
+pub use types::{
+    AnimState, Animal, Channel, Facing, InputFrame, PetState, PlayerId, RosterEntry, Snapshot, Vec2,
+};
 
 /// Versão do protocolo de rede. Incrementar a cada mudança incompatível.
 pub const PROTOCOL_VERSION: u16 = 1;

@@ -1,19 +1,31 @@
-import type { Animal, PetState } from "../types";
+import type { AnimState, Animal, PetState } from "../types";
 
 export const PET_SIZE = 64;
 
-const LOOK: Record<Animal, { color: string; letter: string }> = {
+export const LOOK: Record<Animal, { color: string; letter: string }> = {
   duck: { color: "#F2C230", letter: "P" },
   capybara: { color: "#A26B3F", letter: "C" },
   horse: { color: "#5B3A29", letter: "V" },
   chicken: { color: "#F4F1EA", letter: "G" },
 };
 
+/** Deslocamento vertical do quique: só andando/correndo (dormindo fica parado). */
+export function bounceOffset(anim: AnimState, nowMs: number): number {
+  return anim === "idle" || anim === "sleep" ? 0 : Math.abs(Math.sin(nowMs / 90)) * 4;
+}
+
 /** Desenha o placeholder com os pés em `at` (pixels CSS). */
-export function drawPet(ctx: CanvasRenderingContext2D, pet: PetState, at: { x: number; y: number }): void {
-  const { color, letter } = LOOK[pet.animal];
+export function drawPet(
+  ctx: CanvasRenderingContext2D,
+  pet: PetState,
+  at: { x: number; y: number },
+  name?: string,
+): void {
+  const { letter } = LOOK[pet.animal];
+  const sleeping = pet.anim === "sleep";
+  const color = sleeping ? "#8A8A8A" : LOOK[pet.animal].color;
   const r = PET_SIZE / 2;
-  const bounce = pet.anim === "idle" ? 0 : Math.abs(Math.sin(performance.now() / 90)) * 4;
+  const bounce = bounceOffset(pet.anim, performance.now());
 
   ctx.save();
   ctx.translate(at.x, at.y - r - bounce);
@@ -39,4 +51,28 @@ export function drawPet(ctx: CanvasRenderingContext2D, pet: PetState, at: { x: n
   ctx.textBaseline = "middle";
   ctx.fillText(letter, 0, r * 0.2);
   ctx.restore();
+
+  if (sleeping) {
+    ctx.save();
+    ctx.font = "bold 16px system-ui, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#E8ECF4";
+    ctx.fillText("z z", at.x + r * 0.5, at.y - PET_SIZE - 4);
+    ctx.restore();
+  }
+  if (name) {
+    // `fillText` não interpreta markup: nomes de outros jogadores são seguros aqui.
+    ctx.save();
+    ctx.font = "bold 14px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#000000cc";
+    ctx.fillStyle = "#ffffff";
+    const y = at.y - PET_SIZE - 20;
+    ctx.strokeText(name, at.x, y);
+    ctx.fillText(name, at.x, y);
+    ctx.restore();
+  }
 }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/sim", "app/src-tauri"]
+members = ["crates/protocol", "crates/sim", "crates/signaling", "app/src-tauri"]
 
 [workspace.package]
 edition = "2021"
@@ -10,6 +10,8 @@ license = "MIT"
 [workspace.dependencies]
 dm-protocol = { path = "crates/protocol" }
 dm-sim = { path = "crates/sim" }
+serde_json = "1"
+rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde"] }
 thiserror = "2"

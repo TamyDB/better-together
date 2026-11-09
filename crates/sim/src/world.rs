@@ -61,6 +61,7 @@ impl World {
                 input: None,
                 input_tick: 0,
                 autonomous: false,
+                asleep: false,
                 wander: Wander::default(),
             },
         );
@@ -90,8 +91,56 @@ impl World {
         }
     }
 
+    /// Dormindo, o pet ignora input e vagar e fica em `Sleep`. Ao acordar volta a `Idle`,
+    /// descarta o input guardado e mantém `last_input_seq`.
+    pub fn set_asleep(&mut self, id: PlayerId, asleep: bool) {
+        let Some(pet) = self.pets.get_mut(&id) else {
+            return;
+        };
+        pet.asleep = asleep;
+        pet.input = None;
+        pet.state.anim = if asleep {
+            AnimState::Sleep
+        } else {
+            AnimState::Idle
+        };
+    }
+
+    /// Insere ou substitui o pet `state.id` com exatamente esse estado (uso do convidado), sem
+    /// checar unicidade de animal. Se o pet já existia, mantém `autonomous`, `asleep` e wander.
+    pub fn put_pet(&mut self, state: PetState) {
+        match self.pets.get_mut(&state.id) {
+            Some(pet) => pet.state = state,
+            None => {
+                self.pets.insert(
+                    state.id,
+                    Pet {
+                        state,
+                        input: None,
+                        input_tick: 0,
+                        autonomous: false,
+                        asleep: false,
+                        wander: Wander::default(),
+                    },
+                );
+            }
+        }
+    }
+
+    pub fn aspect(&self) -> f32 {
+        self.aspect
+    }
+
+    pub fn contains(&self, id: PlayerId) -> bool {
+        self.pets.contains_key(&id)
+    }
+
     pub fn step(&mut self) {
         for pet in self.pets.values_mut() {
+            if pet.asleep {
+                pet.state.anim = AnimState::Sleep;
+                continue;
+            }
             let fresh = pet
                 .input
                 .filter(|_| self.tick - pet.input_tick <= INPUT_TIMEOUT_TICKS);
@@ -255,6 +304,58 @@ mod tests {
         let p = &w.snapshot().pets[0];
         assert_eq!(p.last_input_seq, 5);
         assert_eq!(p.facing, Facing::Right);
+    }
+
+    #[test]
+    fn asleep_ignores_input_and_wander() {
+        let mut w = World::new(1.0, 1);
+        w.spawn(PlayerId(0), Animal::Duck, v(0.5, 0.5)).unwrap();
+        w.set_autonomous(PlayerId(0), true);
+        w.apply_input(PlayerId(0), input(1, 1, 0));
+        w.set_asleep(PlayerId(0), true);
+        for seq in 2..122 {
+            w.apply_input(PlayerId(0), input(seq, 1, 0));
+            w.step();
+        }
+        assert_eq!(pos(&w, PlayerId(0)), v(0.5, 0.5));
+        assert_eq!(w.snapshot().pets[0].anim, AnimState::Sleep);
+
+        w.set_asleep(PlayerId(0), false);
+        assert_eq!(w.snapshot().pets[0].anim, AnimState::Idle);
+        assert_eq!(w.snapshot().pets[0].last_input_seq, 121);
+        w.apply_input(PlayerId(0), input(200, 1, 0));
+        w.step();
+        assert!(pos(&w, PlayerId(0)).x > 0.5);
+    }
+
+    #[test]
+    fn put_pet_overrides_state() {
+        let mut w = World::new(2.0, 1);
+        w.spawn(PlayerId(0), Animal::Duck, v(0.5, 0.5)).unwrap();
+        let state = PetState {
+            id: PlayerId(0),
+            animal: Animal::Duck,
+            pos: v(0.9, 0.1),
+            facing: Facing::Left,
+            anim: AnimState::Idle,
+            last_input_seq: 77,
+        };
+        w.put_pet(state.clone());
+        assert_eq!(w.snapshot().pets, vec![state]);
+
+        let other = PetState {
+            id: PlayerId(2),
+            animal: Animal::Duck,
+            pos: v(0.2, 0.3),
+            facing: Facing::Right,
+            anim: AnimState::Run,
+            last_input_seq: 5,
+        };
+        w.put_pet(other.clone());
+        assert!(w.contains(PlayerId(2)));
+        assert!(!w.contains(PlayerId(1)));
+        assert_eq!(w.snapshot().pets[1], other);
+        assert_eq!(w.aspect(), 2.0);
     }
 
     #[test]

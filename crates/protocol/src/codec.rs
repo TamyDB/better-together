@@ -65,6 +65,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             name: "Tamy".into(),
             desired_animal: Animal::Capybara,
+            rejoin_token: u64::MAX,
         };
         assert_eq!(decode::<GuestMsg>(&encode(&hello)), Ok(hello));
 
@@ -87,8 +88,47 @@ mod tests {
                     .map(|(i, a)| pet(i as u8, *a))
                     .collect(),
             },
+            aspect: 21.0 / 9.0,
         };
         assert_eq!(decode::<HostMsg>(&encode(&welcome)), Ok(welcome));
+
+        let lobby = HostMsg::Lobby {
+            taken: vec![Animal::Duck, Animal::Horse],
+        };
+        assert_eq!(decode::<HostMsg>(&encode(&lobby)), Ok(lobby));
+
+        let roster = HostMsg::Roster(vec![
+            RosterEntry {
+                id: PlayerId(0),
+                name: "Host".into(),
+                animal: Animal::Duck,
+                asleep: false,
+            },
+            RosterEntry {
+                id: PlayerId(1),
+                name: "Ana".into(),
+                animal: Animal::Chicken,
+                asleep: true,
+            },
+        ]);
+        assert_eq!(decode::<HostMsg>(&encode(&roster)), Ok(roster));
+
+        let mut sleeping = pet(1, Animal::Horse);
+        sleeping.anim = AnimState::Sleep;
+        let snap = HostMsg::Snapshot(Snapshot {
+            tick: 1,
+            pets: vec![sleeping],
+        });
+        assert_eq!(decode::<HostMsg>(&encode(&snap)), Ok(snap));
+    }
+
+    #[test]
+    fn channel_parse() {
+        assert_eq!(Channel::parse("state"), Some(Channel::State));
+        assert_eq!(Channel::parse("input"), Some(Channel::Input));
+        assert_eq!(Channel::parse("events"), Some(Channel::Events));
+        assert_eq!(Channel::parse("STATE"), None);
+        assert_eq!(Channel::parse(""), None);
     }
 
     proptest! {

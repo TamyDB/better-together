@@ -13,7 +13,7 @@ dividem a área de trabalho do Host, bagunçam janelas, mandam emotes e conversa
 ![Plataforma](https://img.shields.io/badge/plataforma-Windows%2010%2B-0078D4)
 ![Rust](https://img.shields.io/badge/Rust-stable-DEA584?logo=rust&logoColor=white)
 ![Tauri](https://img.shields.io/badge/Tauri-2-24C8D8?logo=tauri&logoColor=white)
-![Status](https://img.shields.io/badge/status-M1%20·%20funda%C3%A7%C3%A3o-F2C230)
+![Status](https://img.shields.io/badge/status-M2%20·%20rede-F2C230)
 
 [O jogo](#-o-jogo) · [Instalação](#-instalação) · [Detalhes técnicos](#-detalhes-técnicos) · [Roadmap](#-roadmap)
 
@@ -63,9 +63,12 @@ as travessuras acima, e todas têm limite de tempo e de quantidade. O Host pode:
 Os convidados nunca recebem títulos de janelas nem nomes de programas do Host.
 
 > [!NOTE]
-> **Estado atual: marco M1 (fundação).** Por enquanto há um bichinho local por cima do
-> desktop. Ele vagueia sozinho e o Host pode assumir o controle pelo teclado. Rede, vídeo,
-> chat e travessuras chegam nos próximos marcos (veja o [Roadmap](#-roadmap)).
+> **Estado atual: marco M2 (rede).** A implementação está pronta, mas ainda não foi
+> validada ponta a ponta em janelas reais (nem no Windows). Dá para criar uma sala, entrar
+> com o código, escolher o animal e ver os bichinhos de todos se mexendo. O vídeo da tela
+> do Host chega no M3: por enquanto o convidado vê um painel escuro com um aviso, com os
+> bichinhos por cima. Vídeo, chat e travessuras chegam nos próximos marcos (veja o
+> [Roadmap](#-roadmap)).
 
 ---
 
@@ -90,6 +93,11 @@ Os convidados nunca recebem títulos de janelas nem nomes de programas do Host.
 <br />
 
 O app é feito para Windows, mas a simulação, os testes e o **modo dev** rodam no Linux.
+
+> [!WARNING]
+> O WebKitGTK não tem WebRTC. No Linux só dá para testar a sinalização e as telas até a
+> conexão: ao entrar numa sala, o erro esperado é "Não foi possível iniciar a conexão com o
+> Host". Jogar de verdade exige o WebView2, em uma VM ou um PC com Windows.
 
 **Fedora**
 ```sh
@@ -120,6 +128,72 @@ DM_DEV_WINDOW=1 pnpm --dir app tauri dev
 ```
 
 Para gerar o executável, sem instalador, rode `pnpm --dir app tauri build --no-bundle`.
+
+### Jogando com amigos
+
+Ainda não existe servidor público (ele chega no M6). Para jogar, alguém precisa subir a
+**sinalização**, o servidor leve que cria as salas e apresenta os PCs uns aos outros. Depois
+disso o jogo em si é P2P.
+
+Para gerar o executável de dev, rode `pnpm --dir app tauri build --debug --no-bundle`
+(sai em `target/debug/`). Sem `--debug`, o executável sai em `target/release/`.
+
+**Sinalização** (escolha uma das alternativas):
+
+```sh
+# Linux/bash: só nesta máquina (padrão 127.0.0.1:8787)
+cargo run -p dm-signaling
+
+# Linux/bash: aberta para a rede
+BT_SIGNALING_ADDR=0.0.0.0:8787 cargo run -p dm-signaling
+```
+
+```powershell
+# PowerShell: aberta para a rede
+$env:BT_SIGNALING_ADDR="0.0.0.0:8787"; cargo run -p dm-signaling
+```
+
+> [!WARNING]
+> `0.0.0.0` expõe a sinalização na rede em `ws://`, **sem TLS**, e pede liberação no
+> firewall. Use só com amigos.
+
+**App** (Host e convidados), apontando para a sinalização:
+
+```sh
+# Linux/bash
+BT_SIGNALING_URL=ws://meu-servidor:8787/ws ./target/debug/better-together
+```
+
+```powershell
+# PowerShell
+$env:BT_SIGNALING_URL="ws://meu-servidor:8787/ws"; .\target\debug\better-together.exe
+```
+
+| Variável | Onde | Padrão |
+|:---|:---|:---|
+| `BT_SIGNALING_ADDR` | sinalização | `127.0.0.1:8787` |
+| `BT_SIGNALING_URL` | app | `ws://127.0.0.1:8787/ws` |
+| `BT_TURN_URL`, `BT_TURN_USER`, `BT_TURN_PASS` | app | desligado (só STUN) |
+
+O TURN só é usado se as **três** variáveis estiverem definidas.
+
+**Testando sozinho, com dois executáveis** (3 terminais PowerShell, na mesma máquina). O teste
+ponta a ponta exige o WebView2, então precisa de uma VM ou um PC com Windows, e o build também
+é feito lá: `pnpm --dir app tauri build --debug --no-bundle`.
+
+1. `cargo run -p dm-signaling`
+2. Host: `.\target\debug\better-together.exe`, com nome, animal e "Criar sala".
+3. Convidado: `.\target\debug\better-together.exe`, com o código da sala; depois escolha um
+   animal livre no lobby.
+
+O roteiro completo de teste manual está em [`docs/e2e-m2.md`](docs/e2e-m2.md).
+
+Pela internet, o Host e os convidados precisam alcançar a sinalização, então ela tem que
+ser hospedada por alguém (uma VPS, ou uma porta liberada no roteador). O código da sala
+(como `PATO-4821`) vale **enquanto o Host estiver conectado**: se o Host sair, a sala some.
+A sala depende da conexão do Host com a sinalização: se ela cair, novos amigos não entram,
+mas quem já está na sala segue conectado. Se a rede de alguém bloquear a conexão direta,
+será preciso um servidor TURN próprio.
 
 ### Controles
 
@@ -168,9 +242,9 @@ flowchart LR
 
 - **O Host é a autoridade.** Ele simula o mundo e os convidados mandam só *inputs*.
   Cada convidado prevê o próprio bichinho e se corrige quando chega um snapshot.
-- **Os bichinhos não fazem parte do vídeo.** A overlay do Host fica fora da captura
-  (`WDA_EXCLUDEFROMCAPTURE`), e cada convidado desenha os sprites por cima do vídeo,
-  então eles continuam nítidos e respondem rápido.
+- **Os bichinhos não vão fazer parte do vídeo.** Com o vídeo do M3, a overlay do Host vai
+  ficar fora da captura (`WDA_EXCLUDEFROMCAPTURE`), e cada convidado vai desenhar os sprites
+  por cima do vídeo, então eles continuam nítidos e respondem rápido.
 - **Rede P2P em estrela** via WebRTC, com um servidor leve só para criar as salas e
   um TURN de reserva para quando a conexão direta falhar.
 
@@ -192,6 +266,7 @@ flowchart LR
 ```
 crates/
   protocol/     tipos, mensagens, codec bincode, versão do protocolo
+  signaling/    servidor de sinalização (axum): salas e troca de SDP/ICE
   sim/          simulação pura e determinística (sem I/O, relógio ou RNG global)
 app/
   src-tauri/    app Tauri: loop da sim, overlay, modo bichinho, hook de teclado, bandeja
@@ -224,17 +299,19 @@ docs/superpowers/
 ### Testes
 
 ```sh
-cargo test --workspace                              # protocolo, simulação, app
+cargo test --workspace                              # protocolo, simulação, sinalização, app
 cargo clippy --workspace --all-targets -- -D warnings
 pnpm --dir app test                                 # render (Vitest)
 ```
 
-A CI roda tudo isso no **Ubuntu** e no **Windows**, onde também faz o build do app.
+A CI roda os testes Rust e o clippy no **Ubuntu** e no **Windows**, onde também faz o build
+do app. `cargo fmt`, `tsc` e o Vitest rodam só no Ubuntu.
 
 ### Documentação
 
 - 📐 [Spec de design](docs/superpowers/specs/2026-11-05-desktop-multiplayer-design.md)
 - 🗺️ [Plano do M1](docs/superpowers/plans/2026-11-05-m1-fundacao.md)
+- 🗺️ [Plano do M2](docs/superpowers/plans/2026-11-06-m2-rede.md)
 
 ---
 
@@ -243,7 +320,7 @@ A CI roda tudo isso no **Ubuntu** e no **Windows**, onde também faz o build do 
 | Marco | Conteúdo | Status |
 |:---:|:---|:---:|
 | **M1** | Fundação: protocolo, simulação, overlay, modo bichinho | ✅ |
-| **M2** | Rede: salas, WebRTC, lobby com escolha de animal, 4 bichinhos | ⏳ |
+| **M2** | Rede: salas, WebRTC, lobby com escolha de animal, 4 bichinhos | 🧪 implementado, E2E manual pendente |
 | **M3** | Vídeo: stream da tela do Host para os convidados | ⏳ |
 | **M4** | Social: chat e emotes | ⏳ |
 | **M5** | Travessuras, painel de permissões e botão de pânico | ⏳ |

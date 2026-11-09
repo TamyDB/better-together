@@ -42,6 +42,7 @@ pub enum AnimState {
     Idle,
     Walk,
     Run,
+    Sleep,
 }
 
 /// Input de um jogador em um instante; `move_*` ∈ {-1, 0, 1} após `sanitized`.
@@ -78,4 +79,34 @@ pub struct PetState {
 pub struct Snapshot {
     pub tick: u32,
     pub pets: Vec<PetState>,
+}
+
+/// Canais de dados WebRTC entre Host e Convidado.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum Channel {
+    State,
+    Input,
+    Events,
+}
+
+impl Channel {
+    /// Converte o rótulo do canal (minúsculo) vindo do WebView.
+    pub fn parse(s: &str) -> Option<Channel> {
+        match s {
+            "state" => Some(Channel::State),
+            "input" => Some(Channel::Input),
+            "events" => Some(Channel::Events),
+            _ => None,
+        }
+    }
+}
+
+/// Entrada do roster: quem está na sessão.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct RosterEntry {
+    pub id: PlayerId,
+    pub name: String,
+    pub animal: Animal,
+    pub asleep: bool,
 }

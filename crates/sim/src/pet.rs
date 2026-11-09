@@ -8,6 +8,7 @@ pub(crate) struct Pet {
     pub input: Option<InputFrame>,
     pub input_tick: u32,
     pub autonomous: bool,
+    pub asleep: bool,
     pub wander: Wander,
 }
 
