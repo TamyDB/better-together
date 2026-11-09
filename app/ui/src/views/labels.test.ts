@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ANIMAL_LABEL, rejectMessage, rejoinChoice } from "./labels";
+import { ANIMAL_LABEL, lastCode, rejectMessage, rejoinChoice } from "./labels";
 
 describe("labels", () => {
   it("nomes dos animais em português", () => {
@@ -37,5 +37,18 @@ describe("rejoinChoice", () => {
 
   it("ignora animal inválido", () => {
     expect(rejoinChoice({ ...last, animal: "dragao" }, "PATO-4821")).toBeNull();
+  });
+});
+
+describe("lastCode", () => {
+  it("devolve o código normalizado", () => {
+    expect(lastCode({ code: "pato4821" })).toBe("PATO-4821");
+  });
+
+  it("ignora dado ausente ou inválido", () => {
+    expect(lastCode(null)).toBeNull();
+    expect(lastCode("PATO-4821")).toBeNull();
+    expect(lastCode({ code: 7 })).toBeNull();
+    expect(lastCode({ code: "<img src=x>" })).toBeNull();
   });
 });

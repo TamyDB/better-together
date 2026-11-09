@@ -1,5 +1,7 @@
 // Peças puras do bridge/rtc, isoladas para testar sem WebRTC.
 
+import type { ChannelName } from "./channels";
+
 /** Mesmo limite de `MAX_MESSAGE_BYTES` do protocolo. */
 export const MAX_MESSAGE_BYTES = 16384;
 
@@ -15,6 +17,35 @@ export function once(f: () => void): () => void {
     done = true;
     f();
   };
+}
+
+/** Mensagens por segundo aceitas de um convidado (a rajada é igual à taxa). `state` só desce. */
+export const GUEST_RATE: Record<ChannelName, number> = { state: 0, input: 240, events: 32 };
+
+/** Token bucket por peer e por canal. O relógio (ms, monotônico) é injetado. */
+export class ChannelLimiter {
+  private readonly peers = new Map<number, Map<ChannelName, { tokens: number; at: number }>>();
+
+  constructor(private readonly now: () => number) {}
+
+  allow(peer: number, channel: ChannelName): boolean {
+    const rate = GUEST_RATE[channel];
+    if (!rate) return false;
+    let buckets = this.peers.get(peer);
+    if (!buckets) this.peers.set(peer, (buckets = new Map()));
+    const at = this.now();
+    let b = buckets.get(channel);
+    if (!b) buckets.set(channel, (b = { tokens: rate, at }));
+    b.tokens = Math.min(rate, b.tokens + (Math.max(0, at - b.at) * rate) / 1000);
+    b.at = at;
+    if (b.tokens < 1) return false;
+    b.tokens -= 1;
+    return true;
+  }
+
+  forget(peer: number): void {
+    this.peers.delete(peer);
+  }
 }
 
 /**

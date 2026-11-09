@@ -2,11 +2,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { startGuestNet, startHostNet, type NetConfig, type NetSession } from "../net/bridge";
 import { normalizeCode } from "../net/signaling";
+import { CONNECT_TIMEOUT_MS, deadline } from "../net/timeout";
 import { startRenderer } from "../render/canvas";
 import { fitRect } from "../render/fit";
 import { LOOK } from "../render/placeholder";
 import type { Animal, RosterEntry, Snapshot } from "../types";
-import { ANIMAL_LABEL, rejectMessage, rejoinChoice, type RejectReason } from "./labels";
+import { ANIMAL_LABEL, lastCode, rejectMessage, rejoinChoice, type RejectReason } from "./labels";
 
 const ANIMALS = Object.keys(ANIMAL_LABEL) as Animal[];
 const VIEWER_W = 1280;
@@ -118,6 +119,11 @@ function launcher(): void {
   const join = el("button", { text: "Entrar" });
   join.disabled = true;
   code.oninput = () => (join.disabled = normalizeCode(code.value) === null);
+  const saved = lastCode(readLast());
+  if (saved) {
+    code.value = saved;
+    join.disabled = false;
+  }
 
   const nick = () => name.value.trim() || "Jogador";
   create.onclick = () => animal && void hostFlow(nick(), animal);
@@ -206,7 +212,15 @@ async function guestFlow(name: string, code: string): Promise<void> {
   let session: NetSession | null = null;
   let cancelled = false;
   const unlisten: UnlistenFn[] = [];
-  const cleanup = () => unlisten.forEach((u) => u());
+  // Canal aberto mas o Host mudo: sem isso, "Conectando..." ficaria para sempre.
+  const firstReply = deadline(CONNECT_TIMEOUT_MS, () => {
+    cleanup();
+    backScreen("Não foi possível entrar", "Não foi possível conectar ao Host", session);
+  });
+  const cleanup = () => {
+    firstReply.settle();
+    unlisten.forEach((u) => u());
+  };
   const leave = () => {
     cancelled = true;
     cleanup();
@@ -225,6 +239,8 @@ async function guestFlow(name: string, code: string): Promise<void> {
   // Reconexão automática: uma única tentativa, sem passar pelos cartões (sala cheia também vale).
   let autoTried = false;
   let autoPending = false;
+  // O nome do último `Hello`: na reconexão automática ele vem da lembrança, não do campo.
+  let sentName = name;
 
   const lobby = () => {
     inViewer = false;
@@ -244,6 +260,7 @@ async function guestFlow(name: string, code: string): Promise<void> {
             () => {
               message = null;
               root().querySelector(".error")?.remove();
+              sentName = name;
               invoke("guest_choose", { name, animal: a }).catch((e) => {
                 message = errorText(e);
                 lobby();
@@ -262,6 +279,7 @@ async function guestFlow(name: string, code: string): Promise<void> {
     const cfg = await invoke<NetConfig>("net_config");
     unlisten.push(
       await listen<{ taken: Animal[] }>("session://lobby", (e) => {
+        firstReply.settle();
         taken = e.payload.taken;
         if (inViewer) return;
         if (!autoTried) {
@@ -269,6 +287,7 @@ async function guestFlow(name: string, code: string): Promise<void> {
           const again = rejoinChoice(readLast(), code);
           if (again) {
             autoPending = true;
+            sentName = again.name;
             invoke("guest_choose", again).catch(() => {
               autoPending = false;
               lobby();
@@ -279,15 +298,17 @@ async function guestFlow(name: string, code: string): Promise<void> {
         if (!autoPending) lobby();
       }),
       await listen<{ animal: Animal; aspect: number }>("session://welcome", (e) => {
+        firstReply.settle();
         inViewer = true;
         autoPending = false;
-        sessionStorage.setItem(LAST_KEY, JSON.stringify({ code, name, animal: e.payload.animal }));
+        sessionStorage.setItem(LAST_KEY, JSON.stringify({ code, name: sentName, animal: e.payload.animal }));
         viewer?.dispose();
         invoke("enter_viewer").catch(() => {});
         viewer = showViewer(e.payload.aspect, leave);
         viewer.setRoster(roster);
       }),
       await listen<{ reason: RejectReason }>("session://rejected", (e) => {
+        firstReply.settle();
         // Rejeição da tentativa automática: lobby normal, sem erro.
         message = autoPending ? null : rejectMessage(e.payload.reason);
         autoPending = false;
@@ -306,6 +327,7 @@ async function guestFlow(name: string, code: string): Promise<void> {
     );
     session = await startGuestNet(cfg, code);
     if (cancelled) await session.stop();
+    firstReply.arm();
   } catch (e) {
     if (cancelled) return; // a própria UI cancelou: a rejeição é esperada
     viewer?.dispose();

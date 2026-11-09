@@ -16,3 +16,29 @@ export function withTimeout<T>(p: Promise<T>, ms: number, message: string): Prom
     );
   });
 }
+
+export interface Deadline {
+  arm(): void;
+  settle(): void;
+}
+
+/** Prazo de uma espera: conta a partir de `arm`; `settle` a encerra, mesmo antes de armar. */
+export function deadline(ms: number, onExpire: () => void): Deadline {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let settled = false;
+  return {
+    arm() {
+      if (settled || timer !== null) return;
+      timer = setTimeout(() => {
+        settled = true;
+        timer = null;
+        onExpire();
+      }, ms);
+    },
+    settle() {
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    },
+  };
+}

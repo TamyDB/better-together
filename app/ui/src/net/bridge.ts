@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { isChannelName } from "./channels";
-import { once, tooBig } from "./guards";
+import { isChannelName, type ChannelName } from "./channels";
+import { ChannelLimiter, once, tooBig } from "./guards";
 import { PeerLink } from "./rtc";
 import { normalizeCode, signalErrorMessage, SignalingClient, type ServerMsg } from "./signaling";
 import { CONNECT_TIMEOUT_MS, withTimeout } from "./timeout";
@@ -17,6 +17,7 @@ export interface NetSession {
 }
 
 const HOST_PEER = 0;
+const HOST_CONNECT_FAILED = "Não foi possível conectar ao Host";
 
 interface SendPayload {
   peer: number;
@@ -24,10 +25,15 @@ interface SendPayload {
   bytes: number[];
 }
 
-/** Liga mensagens de um PeerLink ao Rust, descartando as grandes demais. */
-function forwardRecv(link: PeerLink, peer: number, alive: () => boolean): void {
+/** Liga mensagens de um PeerLink ao Rust, descartando as grandes demais e as que `allow` recusar. */
+function forwardRecv(
+  link: PeerLink,
+  peer: number,
+  alive: () => boolean,
+  allow: (channel: ChannelName) => boolean = () => true,
+): void {
   link.onMessage((channel, bytes) => {
-    if (!alive() || tooBig(bytes)) return;
+    if (!alive() || tooBig(bytes) || !allow(channel)) return;
     invoke("net_recv", { peer, channel, bytes: Array.from(bytes) }).catch(() => {});
   });
 }
@@ -73,6 +79,7 @@ export async function startHostNet(
     opened: boolean;
   }
   const peers = new Map<number, Peer>();
+  const limiter = new ChannelLimiter(() => performance.now());
   let sig: SignalingClient | null = null;
   let unlisten: (() => void) | null = null;
 
@@ -80,6 +87,7 @@ export async function startHostNet(
   const drop = (id: number, p: Peer) => {
     if (peers.get(id) !== p) return;
     peers.delete(id);
+    limiter.forget(id);
     p.link.close();
     if (p.opened && !stopped) notify("net_peer_closed", id);
   };
@@ -99,7 +107,12 @@ export async function startHostNet(
     const link = PeerLink.create(cfg.ice_servers, (data) => s.send({ type: "signal", to: id, data }));
     const p: Peer = { link, opened: false };
     peers.set(id, p);
-    forwardRecv(link, id, () => alive() && p.opened);
+    forwardRecv(
+      link,
+      id,
+      () => alive() && p.opened,
+      (channel) => limiter.allow(id, channel),
+    );
     link.onClose(once(() => drop(id, p)));
     withTimeout(link.opened, CONNECT_TIMEOUT_MS, "Não foi possível conectar ao convidado")
       .then(() => {
@@ -124,8 +137,13 @@ export async function startHostNet(
     const code = await waitFor(s, (m) => (m.type === "room_created" ? m.code : undefined));
     s.onMessage((m) => {
       if (stopped) return;
-      if (m.type === "peer_joined") addPeer(s, m.peer_id);
-      else if (m.type === "peer_left") {
+      if (m.type === "peer_joined") {
+        try {
+          addPeer(s, m.peer_id);
+        } catch (e) {
+          console.warn("Não foi possível iniciar a conexão com o convidado", e);
+        }
+      } else if (m.type === "peer_left") {
         const p = peers.get(m.peer_id);
         if (p) drop(m.peer_id, p);
       } else if (m.type === "signal") void peers.get(m.from)?.link.handleSignal(m.data);
@@ -150,7 +168,7 @@ export async function startGuestNet(cfg: NetConfig, code: string): Promise<NetSe
   let sig: SignalingClient | null = null;
   let unlisten: (() => void) | null = null;
 
-  // Exatamente uma vez, venha de `host_left` ou do fechamento do canal.
+  // Exatamente uma vez, venha de `host_left` (antes de abrir) ou do fechamento do canal.
   const closeHost = once(() => {
     link?.close();
     if (opened && !stopped) notify("net_peer_closed", HOST_PEER);
@@ -191,8 +209,9 @@ export async function startGuestNet(cfg: NetConfig, code: string): Promise<NetSe
     s.onMessage((m) => {
       if (stopped) return;
       if (m.type === "signal" && m.from === hostId) void l.handleSignal(m.data);
-      else if (m.type === "host_left") {
-        if (!opened) abort(new Error("O Host saiu"));
+      else if (m.type === "host_left" && !opened) {
+        // Depois de aberto o P2P sobrevive à sinalização: decidem o canal e o watchdog do Rust.
+        abort(new Error("O Host saiu"));
         closeHost();
       }
     });
@@ -200,7 +219,10 @@ export async function startGuestNet(cfg: NetConfig, code: string): Promise<NetSe
       if (!opened) abort(new Error("Conexão com o servidor perdida"));
     });
 
-    await withTimeout(Promise.race([l.opened, aborted]), CONNECT_TIMEOUT_MS, "Não foi possível conectar ao Host");
+    const linkOpened = l.opened.catch(() => {
+      throw new Error(HOST_CONNECT_FAILED);
+    });
+    await withTimeout(Promise.race([linkOpened, aborted]), CONNECT_TIMEOUT_MS, HOST_CONNECT_FAILED);
     opened = true;
     notify("net_peer_opened", HOST_PEER);
   } catch (e) {

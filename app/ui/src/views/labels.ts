@@ -1,3 +1,4 @@
+import { normalizeCode } from "../net/signaling";
 import type { Animal } from "../types";
 
 export const ANIMAL_LABEL: Record<Animal, string> = {
@@ -29,4 +30,11 @@ export function rejoinChoice(last: unknown, code: string): { name: string; anima
   if (c !== code || typeof name !== "string") return null;
   if (typeof animal !== "string" || !Object.hasOwn(ANIMAL_LABEL, animal)) return null;
   return { name, animal: animal as Animal };
+}
+
+/** Código da última sala (`sessionStorage`, dado não confiável), normalizado. */
+export function lastCode(last: unknown): string | null {
+  if (typeof last !== "object" || last === null) return null;
+  const { code } = last as Record<string, unknown>;
+  return typeof code === "string" ? normalizeCode(code) : null;
 }

@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   invoke: vi.fn(async (..._a: unknown[]) => undefined),
   unlisten: vi.fn(),
   sig: null as any,
   links: [] as any[],
+  createFails: false,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: h.invoke }));
@@ -57,6 +58,7 @@ vi.mock("./rtc", () => {
       this.opened.catch(() => {});
     }
     static create() {
+      if (h.createFails) throw new Error("RTCPeerConnection indisponível");
       const l = new FakeLink();
       h.links.push(l);
       return l;
@@ -92,6 +94,11 @@ beforeEach(() => {
   h.invoke.mockClear();
   h.unlisten.mockClear();
   h.links.length = 0;
+  h.createFails = false;
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 async function host() {
@@ -163,6 +170,76 @@ describe("Host", () => {
     expect(h.invoke).not.toHaveBeenCalled();
   });
 
+  it("falha ao criar o PeerLink registra console.warn", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { sig } = await host();
+    h.createFails = true;
+    sig.emit({ type: "peer_joined", peer_id: 5 });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(h.links).toHaveLength(0);
+    expect(calls("net_peer_opened")).toHaveLength(0);
+    // O próximo convidado segue normal.
+    h.createFails = false;
+    sig.emit({ type: "peer_joined", peer_id: 6 });
+    expect(h.links).toHaveLength(1);
+  });
+
+  describe("limite por canal", () => {
+    async function opened(...ids: number[]) {
+      const { sig } = await host();
+      for (const id of ids) sig.emit({ type: "peer_joined", peer_id: id });
+      const links = [...h.links];
+      for (const l of links) l.resolve();
+      await flush();
+      return { sig, links };
+    }
+    const send = (link: any, channel: string, n: number) => {
+      for (let i = 0; i < n; i++) link.msgCb(channel, new Uint8Array(1));
+    };
+    const recv = (channel?: string) =>
+      calls("net_recv").filter((c) => channel === undefined || (c[1] as any).channel === channel);
+
+    it("descarta o excesso de input e events antes do invoke", async () => {
+      const now = vi.spyOn(performance, "now").mockReturnValue(1000);
+      const { links } = await opened(5);
+      send(links[0], "events", 40);
+      send(links[0], "input", 300);
+      expect(recv("events")).toHaveLength(32);
+      expect(recv("input")).toHaveLength(240);
+      now.mockReturnValue(2000);
+      send(links[0], "events", 40);
+      expect(recv("events")).toHaveLength(64);
+    });
+
+    it("state vindo de convidado nunca chega ao Rust", async () => {
+      vi.spyOn(performance, "now").mockReturnValue(1000);
+      const { links } = await opened(5);
+      send(links[0], "state", 5);
+      expect(recv()).toHaveLength(0);
+    });
+
+    it("peer que sai e volta com o mesmo id recomeça o limite", async () => {
+      vi.spyOn(performance, "now").mockReturnValue(1000);
+      const { sig, links } = await opened(5);
+      send(links[0], "events", 40);
+      expect(recv("events")).toHaveLength(32);
+      sig.emit({ type: "peer_left", peer_id: 5 });
+      sig.emit({ type: "peer_joined", peer_id: 5 });
+      h.links[1].resolve();
+      await flush();
+      send(h.links[1], "events", 40);
+      expect(recv("events")).toHaveLength(64);
+    });
+
+    it("o limite de um peer não afeta o outro", async () => {
+      vi.spyOn(performance, "now").mockReturnValue(1000);
+      const { links } = await opened(5, 6);
+      send(links[0], "events", 40);
+      send(links[1], "events", 2);
+      expect(recv("events")).toHaveLength(34);
+    });
+  });
+
   it("onSignalingLost só sem stop()", async () => {
     const lost = vi.fn();
     const p = startHostNet(cfg, () => {}, lost);
@@ -178,16 +255,53 @@ describe("Host", () => {
 });
 
 describe("Convidado", () => {
-  it("host_left + fechamento do canal: net_peer_closed uma vez", async () => {
+  it("host_left depois de opened é ignorado; o fechamento do canal decide", async () => {
     const { p, sig, link } = await guest();
     link.resolve();
     await p;
     expect(calls("net_peer_opened")).toHaveLength(1);
     sig.emit({ type: "host_left" });
+    await flush();
+    expect(link.closed).toBe(false);
+    expect(calls("net_peer_closed")).toHaveLength(0);
     link.fireClose();
     await flush();
     expect(calls("net_peer_closed")).toHaveLength(1);
     expect(calls("net_peer_closed")[0][1]).toEqual({ peer: 0 });
+  });
+
+  it("host_left antes de opened encerra com erro", async () => {
+    const { p, sig, link } = await guest();
+    sig.emit({ type: "host_left" });
+    await expect(p).rejects.toThrow("O Host saiu");
+    expect(link.closed).toBe(true);
+    expect(calls("net_peer_closed")).toHaveLength(0);
+  });
+
+  it("ICE falho ou canal fechado antes de abrir: não conectou ao Host", async () => {
+    const { p, link } = await guest();
+    link.reject(new Error("Conexão falhou"));
+    await expect(p).rejects.toThrow("Não foi possível conectar ao Host");
+    expect(calls("net_peer_opened")).toHaveLength(0);
+  });
+
+  it("sinalização caída depois de opened não encerra a sessão", async () => {
+    const { p, sig, link } = await guest();
+    link.resolve();
+    await p;
+    sig.drop();
+    await flush();
+    expect(link.closed).toBe(false);
+    expect(calls("net_peer_closed")).toHaveLength(0);
+  });
+
+  it("não limita as mensagens do Host", async () => {
+    const { p, link } = await guest();
+    link.resolve();
+    await p;
+    for (let i = 0; i < 40; i++) link.msgCb("events", new Uint8Array(1));
+    for (let i = 0; i < 300; i++) link.msgCb("state", new Uint8Array(1));
+    expect(calls("net_recv")).toHaveLength(340);
   });
 
   it("ignora signal de outro peer", async () => {
