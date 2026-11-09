@@ -96,6 +96,9 @@ impl<E: FnMut(UiEvent)> TickLoop for GuestLoop<E> {
         for out in outs {
             (self.emit)(out_event(out));
         }
+        if let Some(event) = self.client.take_lost_event() {
+            (self.emit)(guest_event(event));
+        }
     }
 }
 
@@ -120,7 +123,7 @@ pub fn spawn_guest_loop(app: AppHandle, client: GuestClient) -> GuestHandle {
 mod tests {
     use super::*;
     use crate::runtime::backlog::MAX_QUEUED_RECV;
-    use crate::session::guest::HOST_PEER;
+    use crate::session::guest::{HOST_PEER, HOST_SILENCE_TICKS};
     use dm_protocol::{
         encode, AnimState, Channel, Facing, HostMsg, PetState, PlayerId, RejectReason, Snapshot,
         Vec2,
@@ -233,6 +236,32 @@ mod tests {
         let names: Vec<&str> = events.iter().map(|(n, _)| *n).collect();
         assert_eq!(names, vec!["sim://snapshot", "net://send", "net://send"]);
         assert_eq!(events[1].1["channel"], json!("input"));
+    }
+
+    #[test]
+    fn host_silence_reaches_the_ui_once() {
+        let (handle, mut body, events) = guest_loop();
+        handle.send(from_host(&welcome()));
+        let now = Instant::now();
+        assert!(body.drain(now));
+        events.borrow_mut().clear();
+
+        body.run_ticks(HOST_SILENCE_TICKS - 1, now);
+        assert!(events
+            .borrow()
+            .iter()
+            .all(|(name, _)| *name != "session://host-lost"));
+        body.run_ticks(5, now);
+        let lost = |events: &Events| {
+            events
+                .borrow()
+                .iter()
+                .filter(|(name, _)| *name == "session://host-lost")
+                .count()
+        };
+        assert_eq!(lost(&events), 1);
+        body.run_ticks(5, now);
+        assert_eq!(lost(&events), 1);
     }
 
     #[test]

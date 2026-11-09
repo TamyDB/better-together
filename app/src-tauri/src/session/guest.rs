@@ -17,6 +17,8 @@ use crate::input::keys::{Key, KeyState};
 pub const HOST_PEER: PeerId = 0;
 /// Inputs ainda não confirmados pelo Host que o convidado guarda (2 s a 60 Hz).
 pub const MAX_PENDING: usize = 120;
+/// Ticks sem snapshot novo até o convidado dar o Host por perdido (10 s a 60 Hz).
+pub const HOST_SILENCE_TICKS: u32 = 600;
 
 const GUEST_FALLBACK_NAME: &str = "Convidado";
 const ROSTER_FALLBACK_NAME: &str = "Jogador";
@@ -82,6 +84,8 @@ pub struct GuestClient {
     /// Depois de `HostLost` o cliente fica encerrado; reconectar usa um novo cliente com o
     /// mesmo `rejoin_token`.
     lost: bool,
+    /// O watchdog encerrou o cliente e `take_lost_event` ainda não entregou o `HostLost`.
+    silence_lost: bool,
 }
 
 impl GuestClient {
@@ -91,6 +95,7 @@ impl GuestClient {
             keys: KeyState::default(),
             playing: None,
             lost: false,
+            silence_lost: false,
         }
     }
 
@@ -137,13 +142,27 @@ impl GuestClient {
         self.keys.set(key, down);
     }
 
+    /// `HostLost` decidido pelo watchdog de silêncio em `tick`; sai uma única vez.
+    pub fn take_lost_event(&mut self) -> Option<GuestEvent> {
+        std::mem::take(&mut self.silence_lost).then_some(GuestEvent::HostLost)
+    }
+
     /// Um tick local: manda o input atual ao Host, avança a predição e devolve o frame de
     /// render (outros pets interpolados + o próprio previsto, ordenados por id). O `tick` do
     /// frame é o tick estimado do Host. Antes do `Welcome` ou depois de `HostLost`: nada.
+    /// Sem snapshot novo por `HOST_SILENCE_TICKS`, encerra como no `PeerClosed` e deixa o
+    /// `HostLost` em `take_lost_event`.
     pub fn tick(&mut self) -> (Option<Out>, Option<Snapshot>) {
         let Some(p) = self.playing.as_mut() else {
             return (None, None);
         };
+        p.ticks_since = p.ticks_since.saturating_add(1);
+        if p.ticks_since >= HOST_SILENCE_TICKS {
+            self.lost = true;
+            self.silence_lost = true;
+            self.playing = None;
+            return (None, None);
+        }
         let frame = self.keys.to_input(p.next_seq);
         p.next_seq = p.next_seq.saturating_add(1);
         if p.pending.len() == MAX_PENDING {
@@ -158,7 +177,6 @@ impl GuestClient {
             bytes: encode(&GuestMsg::Input(frame)),
         };
 
-        p.ticks_since = p.ticks_since.saturating_add(1);
         let host_tick = p.latest_tick.saturating_add(p.ticks_since);
         let render_tick = host_tick as f32 - INTERP_DELAY_TICKS as f32;
         let me = p.me;
@@ -668,6 +686,61 @@ mod tests {
             .is_empty());
         assert_eq!(g.tick(), (None, None));
         assert_eq!(g.rejoin_token(), 42);
+    }
+
+    #[test]
+    fn host_silence_loses_host_once() {
+        let mut g = welcomed(0.5, 0.5, 0);
+        for _ in 1..HOST_SILENCE_TICKS {
+            assert!(g.tick().0.is_some());
+            assert_eq!(g.take_lost_event(), None);
+        }
+        assert_eq!(g.tick(), (None, None));
+        assert_eq!(g.take_lost_event(), Some(GuestEvent::HostLost));
+        assert_eq!(g.take_lost_event(), None);
+        assert_eq!(g.tick(), (None, None));
+        assert_eq!(g.take_lost_event(), None);
+        // Já encerrado: o canal fechando depois não repete o evento.
+        assert!(g.handle(NetIn::PeerClosed(HOST_PEER)).is_empty());
+    }
+
+    #[test]
+    fn steady_snapshots_keep_host_alive() {
+        let mut g = welcomed(0.5, 0.5, 0);
+        let mut tick = 10;
+        for i in 1..=1200 {
+            assert!(g.tick().0.is_some());
+            if i % 3 == 0 {
+                tick += 3;
+                g.handle(snapshot(tick, vec![pet(ME, Animal::Capybara, 0.5, 0.5, 0)]));
+            }
+            assert_eq!(g.take_lost_event(), None);
+        }
+    }
+
+    #[test]
+    fn stale_or_rejected_snapshot_does_not_reset_silence() {
+        let mut g = welcomed(0.5, 0.5, 0);
+        for _ in 1..HOST_SILENCE_TICKS {
+            g.tick();
+            // Antigo (o `Welcome` foi no tick 10), lixo e canal errado não contam como sinal de vida.
+            g.handle(snapshot(5, vec![pet(ME, Animal::Capybara, 0.5, 0.5, 0)]));
+            g.handle(NetIn::Recv {
+                peer: HOST_PEER,
+                channel: Channel::State,
+                bytes: vec![0xFF; 8],
+            });
+            g.handle(from_host(
+                Channel::Events,
+                &HostMsg::Snapshot(Snapshot {
+                    tick: 999,
+                    pets: vec![pet(ME, Animal::Capybara, 0.5, 0.5, 0)],
+                }),
+            ));
+            assert_eq!(g.take_lost_event(), None);
+        }
+        assert_eq!(g.tick(), (None, None));
+        assert_eq!(g.take_lost_event(), Some(GuestEvent::HostLost));
     }
 
     #[test]
