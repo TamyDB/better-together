@@ -1,4 +1,36 @@
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use dm_sim::consts::TICK_HZ;
+
+const MAX_CATCH_UP: u32 = 5;
+
+/// O que um loop faz a cada passagem. Separado do relógio para os testes não dormirem.
+pub trait TickLoop {
+    /// Processa os comandos pendentes; `false` encerra o loop (canal de comandos fechado).
+    fn drain(&mut self, now: Instant) -> bool;
+    /// Executa os ticks devidos; `ticks` pode ser 0.
+    fn run_ticks(&mut self, ticks: u32, now: Instant);
+}
+
+/// Roda o loop a `TICK_HZ` até `drain` indicar que o canal de comandos fechou.
+pub fn run_tick_loop(body: &mut impl TickLoop) {
+    let mut ticker = Ticker::new(
+        Duration::from_nanos(1_000_000_000 / TICK_HZ as u64),
+        MAX_CATCH_UP,
+    );
+    let mut last = Instant::now();
+    loop {
+        let now = Instant::now();
+        if !body.drain(now) {
+            return;
+        }
+        let ticks = ticker.advance(now - last);
+        last = now;
+        body.run_ticks(ticks, now);
+        thread::sleep(ticker.time_to_next());
+    }
+}
 
 /// Timestep fixo: converte tempo real decorrido em quantidade de ticks a simular.
 pub struct Ticker {
@@ -41,9 +73,36 @@ impl Ticker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     const STEP: Duration = Duration::from_nanos(1_000_000_000 / 60);
+
+    struct StopAfter {
+        passes: u32,
+        ticks_calls: u32,
+    }
+
+    impl TickLoop for StopAfter {
+        fn drain(&mut self, _: Instant) -> bool {
+            if self.passes == 0 {
+                return false;
+            }
+            self.passes -= 1;
+            true
+        }
+        fn run_ticks(&mut self, _: u32, _: Instant) {
+            self.ticks_calls += 1;
+        }
+    }
+
+    #[test]
+    fn loop_stops_when_drain_reports_closed() {
+        let mut body = StopAfter {
+            passes: 2,
+            ticks_calls: 0,
+        };
+        run_tick_loop(&mut body);
+        assert_eq!(body.ticks_calls, 2);
+    }
 
     #[test]
     fn exact_steps() {

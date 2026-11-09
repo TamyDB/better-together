@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::input::keys::{Key, KeyState};
-use crate::runtime::sim_loop::SimSink;
+use crate::runtime::host_loop::SimSink;
 
 /// Intervalo do reenvio do input enquanto o modo está ligado (abaixo do timeout da sim).
 pub const KEEP_ALIVE_MS: u64 = 100;

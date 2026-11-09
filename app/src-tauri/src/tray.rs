@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
 
-use crate::pet_mode::PetMode;
+use crate::app_state::AppState;
 
 /// Ícone na bandeja: alternar o modo bichinho (fallback se a hotkey falhar) e sair.
 pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -22,7 +20,11 @@ pub fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
         .tooltip("Better Together")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "toggle" => app.state::<Arc<PetMode>>().toggle(),
+            "toggle" => {
+                if let Err(e) = app.state::<AppState>().toggle_pet() {
+                    log::debug!("{e}");
+                }
+            }
             "quit" => app.exit(0),
             _ => {}
         });

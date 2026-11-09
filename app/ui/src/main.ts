@@ -17,11 +17,11 @@ const forwardKey = (down: boolean) => (e: KeyboardEvent) => {
     if (!e.repeat) invoke("toggle_pet_mode");
     return;
   }
-  invoke("dev_key", { code: e.code, down });
+  invoke("key_event", { code: e.code, down });
 };
 window.addEventListener("keydown", forwardKey(true));
 window.addEventListener("keyup", forwardKey(false));
 // Sem foco, os key-ups não chegam: solta tudo para o bichinho não ficar andando.
 window.addEventListener("blur", () => {
-  for (const code of ["KeyW", "KeyA", "KeyS", "KeyD", "ShiftLeft"]) invoke("dev_key", { code, down: false });
+  for (const code of ["KeyW", "KeyA", "KeyS", "KeyD", "ShiftLeft"]) invoke("key_event", { code, down: false });
 });

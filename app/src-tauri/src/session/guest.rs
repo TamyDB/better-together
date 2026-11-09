@@ -94,6 +94,7 @@ impl GuestClient {
         }
     }
 
+    #[cfg(test)]
     pub fn rejoin_token(&self) -> u64 {
         self.rejoin_token
     }
@@ -230,7 +231,7 @@ impl GuestClient {
             log::debug!("Welcome com aspect inválido ({aspect}); ignorado");
             return Vec::new();
         }
-        retain_finite(&mut snapshot);
+        retain_on_screen(&mut snapshot);
         let Some(own) = snapshot.pets.iter().find(|p| p.id == me).cloned() else {
             log::debug!("Welcome sem o próprio pet; ignorado");
             return Vec::new();
@@ -266,7 +267,7 @@ impl GuestClient {
             // Fora de ordem: reconciliar com ele desfaria inputs já confirmados.
             return;
         }
-        retain_finite(&mut snapshot);
+        retain_on_screen(&mut snapshot);
         p.latest_tick = snapshot.tick;
         p.ticks_since = 0;
         if let Some(own) = snapshot.pets.iter().find(|s| s.id == p.me).cloned() {
@@ -286,11 +287,11 @@ impl GuestClient {
     }
 }
 
-/// Descarta pets com posição não finita (NaN/inf), que envenenariam a predição e o render.
-fn retain_finite(snapshot: &mut Snapshot) {
-    snapshot
-        .pets
-        .retain(|p| p.pos.x.is_finite() && p.pos.y.is_finite());
+/// Descarta pets fora de `[0, 1]`, o que inclui NaN e infinitos. Valores finitos gigantes
+/// também não passam: o `lerp` os transformaria em NaN e envenenaria a predição e o render.
+fn retain_on_screen(snapshot: &mut Snapshot) {
+    let valid = |v: f32| (0.0..=1.0).contains(&v);
+    snapshot.pets.retain(|p| valid(p.pos.x) && valid(p.pos.y));
 }
 
 #[cfg(test)]
@@ -627,6 +628,28 @@ mod tests {
             .all(|p| p.pos.x.is_finite() && p.pos.y.is_finite()));
         let ids: Vec<PlayerId> = frame.pets.iter().map(|p| p.id).collect();
         assert_eq!(ids, vec![ME, PlayerId(2)]);
+    }
+
+    #[test]
+    fn out_of_range_pets_discarded() {
+        let mut g = welcomed(0.5, 0.5, 0);
+        g.handle(snapshot(
+            20,
+            vec![
+                // `±f32::MAX` são finitos, mas o `lerp` os transforma em NaN.
+                pet(PlayerId(0), Animal::Duck, f32::MAX, 0.5, 0),
+                pet(ME, Animal::Capybara, -f32::MAX, 0.3, 0),
+                pet(PlayerId(2), Animal::Horse, 0.5, 1.0001, 0),
+                pet(PlayerId(3), Animal::Chicken, 0.0, 1.0, 0),
+            ],
+        ));
+        assert_eq!(g.predicted().unwrap().pos, Vec2 { x: 0.5, y: 0.5 });
+        let mut frame = None;
+        for _ in 0..10 {
+            frame = g.tick().1;
+        }
+        let ids: Vec<PlayerId> = frame.unwrap().pets.iter().map(|p| p.id).collect();
+        assert_eq!(ids, vec![ME, PlayerId(3)]);
     }
 
     #[test]
