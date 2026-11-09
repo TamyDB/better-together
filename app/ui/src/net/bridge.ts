@@ -38,7 +38,7 @@ function notify(cmd: string, peer: number): void {
 
 /** Espera uma mensagem de sinalização que `pick` aceite; erro do servidor rejeita. */
 function waitFor<T>(sig: SignalingClient, pick: (m: ServerMsg) => T | undefined): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
+  const p = new Promise<T>((resolve, reject) => {
     sig.onMessage((m) => {
       if (m.type === "error") return reject(new Error(signalErrorMessage(m.reason)));
       const v = pick(m);
@@ -46,10 +46,20 @@ function waitFor<T>(sig: SignalingClient, pick: (m: ServerMsg) => T | undefined)
     });
     sig.onClose(() => reject(new Error("Conexão com o servidor perdida")));
   });
+  return withTimeout(p, CONNECT_TIMEOUT_MS, SERVER_TIMEOUT);
 }
 
-export async function startHostNet(cfg: NetConfig, onCode: (code: string) => void): Promise<NetSession> {
-  const sig = await SignalingClient.connect(cfg.signaling_url);
+const SERVER_TIMEOUT = "Não foi possível conectar ao servidor";
+
+function connectSignaling(url: string): Promise<SignalingClient> {
+  return withTimeout(SignalingClient.connect(url), CONNECT_TIMEOUT_MS, SERVER_TIMEOUT);
+}
+
+export async function startHostNet(
+  cfg: NetConfig,
+  onCode: (code: string) => void,
+  onSignalingLost?: () => void,
+): Promise<NetSession> {
   let stopped = false;
   const alive = () => !stopped;
   interface Peer {
@@ -57,6 +67,8 @@ export async function startHostNet(cfg: NetConfig, onCode: (code: string) => voi
     opened: boolean;
   }
   const peers = new Map<number, Peer>();
+  let sig: SignalingClient | null = null;
+  let unlisten: (() => void) | null = null;
 
   // Limpa o peer; `net_peer_closed` só se `net_peer_opened` foi invocado (e só uma vez).
   const drop = (id: number, p: Peer) => {
@@ -66,25 +78,19 @@ export async function startHostNet(cfg: NetConfig, onCode: (code: string) => voi
     if (p.opened && !stopped) notify("net_peer_closed", id);
   };
 
-  const unlisten = await listen<SendPayload>("net://send", (e) => {
-    const { peer, channel, bytes } = e.payload;
-    if (!isChannelName(channel)) return;
-    peers.get(peer)?.link.send(channel, Uint8Array.from(bytes));
-  });
-
   const stop = async () => {
     if (stopped) return;
     stopped = true;
-    unlisten();
+    unlisten?.();
     for (const p of peers.values()) p.link.close();
     peers.clear();
-    sig.close();
+    sig?.close();
   };
 
-  const addPeer = (id: number) => {
+  const addPeer = (s: SignalingClient, id: number) => {
     const old = peers.get(id);
     if (old) drop(id, old);
-    const link = PeerLink.create(cfg.ice_servers, (data) => sig.send({ type: "signal", to: id, data }));
+    const link = PeerLink.create(cfg.ice_servers, (data) => s.send({ type: "signal", to: id, data }));
     const p: Peer = { link, opened: false };
     peers.set(id, p);
     forwardRecv(link, id, () => alive() && p.opened);
@@ -100,16 +106,27 @@ export async function startHostNet(cfg: NetConfig, onCode: (code: string) => voi
   };
 
   try {
-    sig.send({ type: "create_room" });
-    const code = await waitFor(sig, (m) => (m.type === "room_created" ? m.code : undefined));
-    // waitFor deixou handlers de rejeição; os de rotina vêm agora.
-    sig.onMessage((m) => {
+    // O listener vem antes da conexão: nenhum `net://send` se perde nem corre contra o `stop`.
+    unlisten = await listen<SendPayload>("net://send", (e) => {
+      const { peer, channel, bytes } = e.payload;
+      if (!isChannelName(channel)) return;
+      peers.get(peer)?.link.send(channel, Uint8Array.from(bytes));
+    });
+    const s = await connectSignaling(cfg.signaling_url);
+    sig = s;
+    if (stopped) throw new Error("Cancelado");
+    s.send({ type: "create_room" });
+    const code = await waitFor(s, (m) => (m.type === "room_created" ? m.code : undefined));
+    s.onMessage((m) => {
       if (stopped) return;
-      if (m.type === "peer_joined") addPeer(m.peer_id);
+      if (m.type === "peer_joined") addPeer(s, m.peer_id);
       else if (m.type === "peer_left") {
         const p = peers.get(m.peer_id);
         if (p) drop(m.peer_id, p);
       } else if (m.type === "signal") void peers.get(m.from)?.link.handleSignal(m.data);
+    });
+    s.onClose(() => {
+      if (!stopped) onSignalingLost?.();
     });
     onCode(code);
   } catch (e) {
@@ -122,10 +139,11 @@ export async function startHostNet(cfg: NetConfig, onCode: (code: string) => voi
 export async function startGuestNet(cfg: NetConfig, code: string): Promise<NetSession> {
   const norm = normalizeCode(code);
   if (!norm) throw new Error("Código inválido");
-  const sig = await SignalingClient.connect(cfg.signaling_url);
   let stopped = false;
   let opened = false;
   let link: PeerLink | null = null;
+  let sig: SignalingClient | null = null;
+  let unlisten: (() => void) | null = null;
 
   // Exatamente uma vez, venha de `host_left` ou do fechamento do canal.
   const closeHost = once(() => {
@@ -133,24 +151,30 @@ export async function startGuestNet(cfg: NetConfig, code: string): Promise<NetSe
     if (opened && !stopped) notify("net_peer_closed", HOST_PEER);
   });
 
-  const unlisten = await listen<SendPayload>("net://send", (e) => {
-    const { peer, channel, bytes } = e.payload;
-    if (peer !== HOST_PEER || !isChannelName(channel)) return;
-    link?.send(channel, Uint8Array.from(bytes));
-  });
-
   const stop = async () => {
     if (stopped) return;
     stopped = true;
-    unlisten();
+    unlisten?.();
     link?.close();
-    sig.close();
+    sig?.close();
   };
 
   try {
-    sig.send({ type: "join_room", code: norm });
-    const hostId = await waitFor(sig, (m) => (m.type === "joined" ? m.host_id : undefined));
-    const l = PeerLink.create(cfg.ice_servers, (data) => sig.send({ type: "signal", to: hostId, data }));
+    unlisten = await listen<SendPayload>("net://send", (e) => {
+      const { peer, channel, bytes } = e.payload;
+      if (peer !== HOST_PEER || !isChannelName(channel)) return;
+      link?.send(channel, Uint8Array.from(bytes));
+    });
+    const s = await connectSignaling(cfg.signaling_url);
+    sig = s;
+    s.send({ type: "join_room", code: norm });
+    const hostId = await waitFor(s, (m) => (m.type === "joined" ? m.host_id : undefined));
+    let l: PeerLink;
+    try {
+      l = PeerLink.create(cfg.ice_servers, (data) => s.send({ type: "signal", to: hostId, data }));
+    } catch {
+      throw new Error("Não foi possível iniciar a conexão com o Host");
+    }
     link = l;
     forwardRecv(l, HOST_PEER, () => !stopped && opened);
     l.onClose(closeHost);
@@ -158,7 +182,8 @@ export async function startGuestNet(cfg: NetConfig, code: string): Promise<NetSe
     // Falha antes de abrir (host_left, sinalização caída) também aborta a espera.
     let abort!: (e: Error) => void;
     const aborted = new Promise<never>((_, rej) => (abort = rej));
-    sig.onMessage((m) => {
+    aborted.catch(() => {});
+    s.onMessage((m) => {
       if (stopped) return;
       if (m.type === "signal" && m.from === hostId) void l.handleSignal(m.data);
       else if (m.type === "host_left") {
@@ -166,12 +191,11 @@ export async function startGuestNet(cfg: NetConfig, code: string): Promise<NetSe
         closeHost();
       }
     });
-    sig.onClose(() => {
+    s.onClose(() => {
       if (!opened) abort(new Error("Conexão com o servidor perdida"));
     });
 
     await withTimeout(Promise.race([l.opened, aborted]), CONNECT_TIMEOUT_MS, "Não foi possível conectar ao Host");
-    if (stopped) throw new Error("Cancelado");
     opened = true;
     notify("net_peer_opened", HOST_PEER);
   } catch (e) {

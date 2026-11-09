@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { normalizeCode, parseServerMsg } from "./signaling";
 
 describe("parseServerMsg", () => {
@@ -35,6 +35,38 @@ describe("normalizeCode", () => {
   it("rejeita inválidos", () => {
     for (const bad of ["PAT-4821", "PATO-48A1", "PATO-48210", "", "ßß-4821", "ÁTO-4821", "A".repeat(100)]) {
       expect(normalizeCode(bad), bad).toBeNull();
+    }
+  });
+});
+
+describe("SignalingClient.onClose", () => {
+  it("chama já se o socket fechou antes do registro", async () => {
+    const { SignalingClient } = await import("./signaling");
+    class FakeWS {
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      readyState = 1;
+      onopen: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onmessage: unknown = null;
+      constructor() {
+        queueMicrotask(() => this.onopen?.());
+      }
+      close() {}
+    }
+    vi.stubGlobal("WebSocket", FakeWS);
+    try {
+      const c = await SignalingClient.connect("ws://x");
+      const ws = (c as unknown as { ws: FakeWS }).ws;
+      ws.readyState = 3;
+      ws.onclose?.();
+      const cb = vi.fn();
+      c.onClose(cb);
+      expect(cb).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 });

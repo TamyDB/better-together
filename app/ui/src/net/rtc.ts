@@ -118,7 +118,12 @@ export class PeerLink {
 
   send(channel: ChannelName, bytes: Uint8Array): void {
     const ch = this.channels.get(channel);
-    if (ch && ch.readyState === "open") ch.send(bytes as Uint8Array<ArrayBuffer>);
+    if (!ch || ch.readyState !== "open") return;
+    try {
+      ch.send(bytes as Uint8Array<ArrayBuffer>);
+    } catch (e) {
+      console.debug("falha ao enviar no DataChannel", e);
+    }
   }
 
   onMessage(cb: (channel: ChannelName, bytes: Uint8Array) => void): void {

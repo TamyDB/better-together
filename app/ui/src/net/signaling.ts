@@ -92,7 +92,17 @@ export function normalizeCode(input: string): string | null {
   return /^[A-Z]{4}$/.test(word) && /^[0-9]{4}$/.test(digits) ? `${word}-${digits}` : null;
 }
 
+/** Uma exceção em um callback não pode impedir os demais. */
+function safe(f: () => void): void {
+  try {
+    f();
+  } catch (e) {
+    console.debug("callback de sinalização lançou", e);
+  }
+}
+
 export class SignalingClient {
+  private closed = false;
   private msgCbs: ((m: ServerMsg) => void)[] = [];
   private closeCbs: (() => void)[] = [];
 
@@ -100,11 +110,13 @@ export class SignalingClient {
     ws.onmessage = (e) => {
       if (typeof e.data !== "string") return;
       const m = parseServerMsg(e.data);
-      if (m) for (const cb of this.msgCbs) cb(m);
+      if (m) for (const cb of this.msgCbs) safe(() => cb(m));
     };
     ws.onclose = () => {
-      for (const cb of this.closeCbs) cb();
+      this.closed = true;
+      for (const cb of this.closeCbs) safe(cb);
     };
+    if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) this.closed = true;
   }
 
   static connect(url: string): Promise<SignalingClient> {
@@ -130,6 +142,8 @@ export class SignalingClient {
   }
 
   onClose(cb: () => void): void {
+    // Se o socket já fechou, o evento não vem mais: avisa agora.
+    if (this.closed) return safe(cb);
     this.closeCbs.push(cb);
   }
 
