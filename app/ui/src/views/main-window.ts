@@ -6,11 +6,21 @@ import { startRenderer } from "../render/canvas";
 import { fitRect } from "../render/fit";
 import { LOOK } from "../render/placeholder";
 import type { Animal, RosterEntry, Snapshot } from "../types";
-import { ANIMAL_LABEL, rejectMessage, type RejectReason } from "./labels";
+import { ANIMAL_LABEL, rejectMessage, rejoinChoice, type RejectReason } from "./labels";
 
 const ANIMALS = Object.keys(ANIMAL_LABEL) as Animal[];
 const VIEWER_W = 1280;
 const VIEWER_H = 720;
+/** Última entrada bem-sucedida; sobrevive ao reload do "Voltar" e morre com o app, como o token. */
+const LAST_KEY = "bt.last";
+
+function readLast(): unknown {
+  try {
+    return JSON.parse(sessionStorage.getItem(LAST_KEY) ?? "null");
+  } catch {
+    return null;
+  }
+}
 
 /** Cria um elemento; todo texto entra por `textContent` (nomes vêm de pessoas não confiáveis). */
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -212,6 +222,9 @@ async function guestFlow(name: string, code: string): Promise<void> {
   let inViewer = false;
   let roster: RosterEntry[] = [];
   let viewer = null as ViewerHandle | null;
+  // Reconexão automática: uma única tentativa, sem passar pelos cartões (sala cheia também vale).
+  let autoTried = false;
+  let autoPending = false;
 
   const lobby = () => {
     inViewer = false;
@@ -250,17 +263,34 @@ async function guestFlow(name: string, code: string): Promise<void> {
     unlisten.push(
       await listen<{ taken: Animal[] }>("session://lobby", (e) => {
         taken = e.payload.taken;
-        if (!inViewer) lobby();
+        if (inViewer) return;
+        if (!autoTried) {
+          autoTried = true;
+          const again = rejoinChoice(readLast(), code);
+          if (again) {
+            autoPending = true;
+            invoke("guest_choose", again).catch(() => {
+              autoPending = false;
+              lobby();
+            });
+            return;
+          }
+        }
+        if (!autoPending) lobby();
       }),
-      await listen<{ aspect: number }>("session://welcome", (e) => {
+      await listen<{ animal: Animal; aspect: number }>("session://welcome", (e) => {
         inViewer = true;
+        autoPending = false;
+        sessionStorage.setItem(LAST_KEY, JSON.stringify({ code, name, animal: e.payload.animal }));
         viewer?.dispose();
         invoke("enter_viewer").catch(() => {});
         viewer = showViewer(e.payload.aspect, leave);
         viewer.setRoster(roster);
       }),
       await listen<{ reason: RejectReason }>("session://rejected", (e) => {
-        message = rejectMessage(e.payload.reason);
+        // Rejeição da tentativa automática: lobby normal, sem erro.
+        message = autoPending ? null : rejectMessage(e.payload.reason);
+        autoPending = false;
         lobby();
       }),
       await listen<RosterEntry[]>("session://roster", (e) => {
