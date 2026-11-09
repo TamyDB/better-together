@@ -173,6 +173,14 @@ pub fn run() {
             toggle_pet_mode,
             session_reset,
         ])
+        // A sessão vive na janela `main`: fechá-la encerra o app (sem overlay/hook órfãos).
+        .on_window_event(|window, event| {
+            if window.label() == overlay::MAIN_LABEL
+                && matches!(event, tauri::WindowEvent::CloseRequested { .. })
+            {
+                window.app_handle().exit(0);
+            }
+        })
         .setup(|app| {
             overlay::setup_main(app.handle())?;
             Ok(())

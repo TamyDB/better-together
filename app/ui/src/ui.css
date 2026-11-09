@@ -1,0 +1,53 @@
+html, body { margin: 0; height: 100%; overflow: hidden; }
+body {
+  background: #161a24;
+  color: #e8ecf4;
+  font: 14px system-ui, sans-serif;
+}
+/* Overlay: transparente, só o canvas dos bichinhos. */
+body.overlay { background: transparent; }
+body.overlay canvas { display: block; width: 100vw; height: 100vh; background: transparent; }
+
+#app { box-sizing: border-box; height: 100%; padding: 16px; display: flex; flex-direction: column; gap: 10px; overflow: auto; }
+h1 { margin: 0; font-size: 18px; }
+h2 { margin: 0; font-size: 13px; font-weight: 600; color: #9aa6bf; }
+.row { display: flex; gap: 8px; }
+.row > input { flex: 1; min-width: 0; }
+input {
+  padding: 8px 10px; border-radius: 6px; border: 1px solid #343c52;
+  background: #1d2330; color: inherit; font: inherit;
+}
+button {
+  padding: 8px 14px; border-radius: 6px; border: 0; cursor: pointer;
+  background: #4c7cf0; color: #fff; font: inherit; font-weight: 600;
+}
+button:hover:not(:disabled) { background: #6590ff; }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button.secondary { background: #2a3248; }
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.card {
+  display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 4px;
+  background: #1d2330; border: 2px solid transparent; color: inherit; font-weight: 500;
+}
+.card:hover:not(:disabled) { background: #262e43; }
+.card.selected { border-color: #4c7cf0; }
+.pet {
+  width: 44px; height: 44px; border-radius: 50%; border: 3px solid #2b1b10; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 20px; color: #2b1b10;
+}
+.code { font-size: 36px; font-weight: 800; letter-spacing: 2px; text-align: center; }
+.error { color: #ff8a8a; }
+.warn { color: #ffd479; }
+.muted { color: #9aa6bf; }
+ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+li { display: flex; align-items: center; gap: 8px; }
+li .pet { width: 24px; height: 24px; font-size: 12px; border-width: 2px; }
+.center { align-items: center; justify-content: center; text-align: center; flex: 1; }
+
+#app.viewer { padding: 0; gap: 0; background: #000; }
+.stage { position: relative; flex: 1; overflow: hidden; }
+.stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.video {
+  position: absolute; background: #1d2330; color: #5d6985;
+  display: flex; align-items: center; justify-content: center;
+}

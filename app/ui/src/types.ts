@@ -2,7 +2,7 @@
 
 export type Animal = "duck" | "capybara" | "horse" | "chicken";
 export type Facing = "left" | "right";
-export type AnimState = "idle" | "walk" | "run";
+export type AnimState = "idle" | "walk" | "run" | "sleep";
 
 export interface Vec2 {
   x: number;
@@ -21,4 +21,12 @@ export interface PetState {
 export interface Snapshot {
   tick: number;
   pets: PetState[];
+}
+
+/** Entrada do `session://roster`. */
+export interface RosterEntry {
+  id: number;
+  name: string;
+  animal: Animal;
+  asleep: boolean;
 }
