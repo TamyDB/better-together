@@ -94,6 +94,11 @@ Os convidados nunca recebem títulos de janelas nem nomes de programas do Host.
 
 O app é feito para Windows, mas a simulação, os testes e o **modo dev** rodam no Linux.
 
+> [!WARNING]
+> O WebKitGTK não tem WebRTC. No Linux só dá para testar a sinalização e as telas até a
+> conexão: ao entrar numa sala, o erro esperado é "Não foi possível iniciar a conexão com o
+> Host". Jogar de verdade exige o WebView2, em uma VM ou um PC com Windows.
+
 **Fedora**
 ```sh
 sudo dnf install webkit2gtk4.1-devel libsoup3-devel javascriptcoregtk4.1-devel \
@@ -172,12 +177,13 @@ $env:BT_SIGNALING_URL="ws://meu-servidor:8787/ws"; .\target\debug\better-togethe
 
 O TURN só é usado se as **três** variáveis estiverem definidas.
 
-**Testando sozinho, com dois executáveis** (3 terminais, na mesma máquina):
+**Testando sozinho, com dois executáveis** (3 terminais PowerShell, na mesma máquina). O teste
+ponta a ponta exige o WebView2, então precisa de uma VM ou um PC com Windows, e o build também
+é feito lá: `pnpm --dir app tauri build --debug --no-bundle`.
 
 1. `cargo run -p dm-signaling`
-2. Host: `DM_DEV_WINDOW=1 ./target/debug/better-together`, com nome, animal e "Criar sala".
-   O `DM_DEV_WINDOW=1` é só para desenvolver no Linux (janela comum no lugar da overlay).
-3. Convidado: `./target/debug/better-together`, com o código da sala; depois escolha um
+2. Host: `.\target\debug\better-together.exe`, com nome, animal e "Criar sala".
+3. Convidado: `.\target\debug\better-together.exe`, com o código da sala; depois escolha um
    animal livre no lobby.
 
 O roteiro completo de teste manual está em [`docs/e2e-m2.md`](docs/e2e-m2.md).
@@ -236,9 +242,9 @@ flowchart LR
 
 - **O Host é a autoridade.** Ele simula o mundo e os convidados mandam só *inputs*.
   Cada convidado prevê o próprio bichinho e se corrige quando chega um snapshot.
-- **Os bichinhos não fazem parte do vídeo.** A overlay do Host fica fora da captura
-  (`WDA_EXCLUDEFROMCAPTURE`), e cada convidado desenha os sprites por cima do vídeo,
-  então eles continuam nítidos e respondem rápido.
+- **Os bichinhos não vão fazer parte do vídeo.** Com o vídeo do M3, a overlay do Host vai
+  ficar fora da captura (`WDA_EXCLUDEFROMCAPTURE`), e cada convidado vai desenhar os sprites
+  por cima do vídeo, então eles continuam nítidos e respondem rápido.
 - **Rede P2P em estrela** via WebRTC, com um servidor leve só para criar as salas e
   um TURN de reserva para quando a conexão direta falhar.
 
