@@ -19,34 +19,60 @@ async fn start() -> SocketAddr {
     addr
 }
 
+const TIMEOUT: Duration = Duration::from_secs(2);
+
 async fn connect(addr: SocketAddr) -> Ws {
-    let (ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
-        .await
-        .unwrap();
+    let (ws, _) = tokio::time::timeout(
+        TIMEOUT,
+        tokio_tungstenite::connect_async(format!("ws://{addr}/ws")),
+    )
+    .await
+    .expect("timeout conectando")
+    .unwrap();
     ws
 }
 
 async fn send_raw(ws: &mut Ws, text: &str) {
-    ws.send(Message::text(text)).await.unwrap();
+    tokio::time::timeout(TIMEOUT, ws.send(Message::text(text)))
+        .await
+        .expect("timeout enviando")
+        .unwrap();
+}
+
+async fn close(ws: &mut Ws) {
+    tokio::time::timeout(TIMEOUT, ws.close(None))
+        .await
+        .expect("timeout fechando")
+        .unwrap();
 }
 
 async fn send(ws: &mut Ws, msg: &ClientMsg) {
     send_raw(ws, &serde_json::to_string(msg).unwrap()).await;
 }
 
-/// Próxima mensagem de texto do servidor (ignora ping/pong), com timeout de 2 s.
-async fn recv_json(ws: &mut Ws) -> ServerMsg {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            match ws.next().await {
-                Some(Ok(Message::Text(t))) => return serde_json::from_str(t.as_str()).unwrap(),
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
-                other => panic!("esperava texto, veio {other:?}"),
-            }
+/// Próxima mensagem de texto do servidor (ignora ping/pong).
+async fn next_json(ws: &mut Ws) -> ServerMsg {
+    loop {
+        match ws.next().await {
+            Some(Ok(Message::Text(t))) => return serde_json::from_str(t.as_str()).unwrap(),
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
+            other => panic!("esperava texto, veio {other:?}"),
         }
-    })
-    .await
-    .expect("timeout esperando mensagem do servidor")
+    }
+}
+
+/// Próxima mensagem de texto do servidor, com timeout de 2 s.
+async fn recv_json(ws: &mut Ws) -> ServerMsg {
+    tokio::time::timeout(TIMEOUT, next_json(ws))
+        .await
+        .expect("timeout esperando mensagem do servidor")
+}
+
+/// Confere que nenhuma mensagem chega em `wait`.
+async fn assert_silent(ws: &mut Ws, wait: Duration) {
+    if let Ok(msg) = tokio::time::timeout(wait, next_json(ws)).await {
+        panic!("não esperava mensagem, veio {msg:?}");
+    }
 }
 
 /// Cria uma sala e devolve (código, id do Host).
@@ -106,11 +132,13 @@ async fn full_flow() {
         }
     );
 
-    guest.close(None).await.unwrap();
+    close(&mut guest).await;
     assert_eq!(
         recv_json(&mut host).await,
         ServerMsg::PeerLeft { peer_id: guest_id }
     );
+    // Exatamente uma vez.
+    assert_silent(&mut host, Duration::from_millis(200)).await;
 }
 
 #[tokio::test]
@@ -121,7 +149,7 @@ async fn host_leaving_notifies_guests() {
     let mut guest = connect(addr).await;
     join_room(&mut guest, &code, host_id).await;
 
-    host.close(None).await.unwrap();
+    close(&mut host).await;
     assert_eq!(recv_json(&mut guest).await, ServerMsg::HostLeft);
 }
 
@@ -180,4 +208,32 @@ async fn join_rate_limited() {
             i + 1
         );
     }
+}
+
+#[tokio::test]
+async fn create_rate_limited_after_joins() {
+    let addr = start().await;
+    let mut ws = connect(addr).await;
+    for _ in 0..10 {
+        send(
+            &mut ws,
+            &ClientMsg::JoinRoom {
+                code: "PATO-0000".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            recv_json(&mut ws).await,
+            ServerMsg::Error {
+                reason: SignalError::RoomNotFound
+            }
+        );
+    }
+    send(&mut ws, &ClientMsg::CreateRoom).await;
+    assert_eq!(
+        recv_json(&mut ws).await,
+        ServerMsg::Error {
+            reason: SignalError::RateLimited
+        }
+    );
 }

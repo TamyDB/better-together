@@ -20,7 +20,7 @@ use axum::{
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use tokio::{
     net::TcpListener,
-    sync::mpsc::{self, UnboundedSender},
+    sync::mpsc::{self, error::TrySendError},
     time::Duration,
 };
 
@@ -40,6 +40,8 @@ pub const PING_INTERVAL: Duration = Duration::from_secs(15);
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 /// Intervalo da limpeza dos baldes do rate limit.
 pub const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+/// Mensagens pendentes por conexão; fila cheia derruba o destino.
+pub const QUEUE_CAPACITY: usize = 32;
 
 type Shared = Arc<Mutex<Hub>>;
 
@@ -48,12 +50,13 @@ type Shared = Arc<Mutex<Hub>>;
 struct Hub {
     registry: Registry,
     limiter: RateLimiter,
-    conns: HashMap<ConnId, UnboundedSender<ServerMsg>>,
+    /// Fila de saída de cada conexão, já serializada em JSON.
+    conns: HashMap<ConnId, mpsc::Sender<String>>,
     next_id: u64,
 }
 
 impl Hub {
-    fn register(&mut self, tx: UnboundedSender<ServerMsg>) -> ConnId {
+    fn register(&mut self, tx: mpsc::Sender<String>) -> ConnId {
         self.next_id += 1;
         let id = ConnId(self.next_id);
         self.conns.insert(id, tx);
@@ -61,21 +64,26 @@ impl Hub {
     }
 
     /// Envio síncrono; se a conexão já saiu, a mensagem é descartada.
-    fn send(&self, to: ConnId, msg: ServerMsg) {
-        if let Some(tx) = self.conns.get(&to) {
-            let _ = tx.send(msg);
+    /// Fila cheia: o destino não está lendo e é derrubado. Sem o `Sender`, o `recv` da task dele
+    /// devolve `None` e ela sai pelo mesmo caminho de [`Hub::disconnect`].
+    fn send(&mut self, to: ConnId, msg: ServerMsg) {
+        let Some(tx) = self.conns.get(&to) else {
+            return;
+        };
+        let Ok(json) = serde_json::to_string(&msg) else {
+            return;
+        };
+        if let Err(TrySendError::Full(_)) = tx.try_send(json) {
+            log::debug!("conexão {} não lê a fila; derrubando", to.0);
+            self.conns.remove(&to);
         }
     }
 
-    fn error(&self, to: ConnId, reason: SignalError) {
+    fn error(&mut self, to: ConnId, reason: SignalError) {
         self.send(to, ServerMsg::Error { reason });
     }
 
-    fn handle_text(&mut self, id: ConnId, ip: IpAddr, text: &str) {
-        let Ok(msg) = serde_json::from_str::<ClientMsg>(text) else {
-            self.error(id, SignalError::BadMessage);
-            return;
-        };
+    fn handle_msg(&mut self, id: ConnId, ip: IpAddr, msg: ClientMsg) {
         match msg {
             ClientMsg::CreateRoom => {
                 if !self.limiter.allow(ip, Instant::now()) {
@@ -117,7 +125,8 @@ impl Hub {
         }
     }
 
-    /// Caminho único de saída: fechamento, erro de socket ou keep-alive vencido.
+    /// Caminho único de saída: fechamento, erro de socket, keep-alive vencido, fila cheia ou
+    /// pânico na task. Idempotente.
     fn disconnect(&mut self, id: ConnId) {
         self.conns.remove(&id);
         match self.registry.leave(id) {
@@ -182,6 +191,19 @@ async fn ws_handler(
         .on_upgrade(move |socket| handle_socket(socket, addr.ip(), hub))
 }
 
+/// Garante o [`Hub::disconnect`] uma única vez, mesmo se a task da conexão entrar em pânico.
+struct ConnGuard {
+    hub: Shared,
+    id: ConnId,
+}
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        lock(&self.hub).disconnect(self.id);
+        log::debug!("conexão {} encerrada", self.id.0);
+    }
+}
+
 /// Envia um frame; falha ou demora acima de [`IDLE_TIMEOUT`] encerram a conexão.
 async fn send_frame(sink: &mut SplitSink<WebSocket, Message>, frame: Message) -> bool {
     matches!(
@@ -191,8 +213,12 @@ async fn send_frame(sink: &mut SplitSink<WebSocket, Message>, frame: Message) ->
 }
 
 async fn handle_socket(socket: WebSocket, ip: IpAddr, hub: Shared) {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::channel(QUEUE_CAPACITY);
     let id = lock(&hub).register(tx);
+    let guard = ConnGuard {
+        hub: hub.clone(),
+        id,
+    };
     log::debug!("conexão {} de {ip}", id.0);
     let (mut sink, mut stream) = socket.split();
 
@@ -207,15 +233,18 @@ async fn handle_socket(socket: WebSocket, ip: IpAddr, hub: Shared) {
                 let Some(Ok(frame)) = incoming else { break };
                 idle.as_mut().reset(tokio::time::Instant::now() + IDLE_TIMEOUT);
                 match frame {
-                    Message::Text(text) => lock(&hub).handle_text(id, ip, text.as_str()),
+                    // O parse (até 64 KiB) fica fora do lock global.
+                    Message::Text(text) => match serde_json::from_str::<ClientMsg>(&text) {
+                        Ok(msg) => lock(&hub).handle_msg(id, ip, msg),
+                        Err(_) => lock(&hub).error(id, SignalError::BadMessage),
+                    },
                     Message::Binary(_) => lock(&hub).error(id, SignalError::BadMessage),
                     Message::Close(_) => break,
                     Message::Ping(_) | Message::Pong(_) => {}
                 }
             }
             outgoing = rx.recv() => {
-                let Some(msg) = outgoing else { break };
-                let Ok(json) = serde_json::to_string(&msg) else { continue };
+                let Some(json) = outgoing else { break };
                 if !send_frame(&mut sink, Message::Text(json.into())).await {
                     break;
                 }
@@ -232,6 +261,97 @@ async fn handle_socket(socket: WebSocket, ip: IpAddr, hub: Shared) {
         }
     }
 
-    lock(&hub).disconnect(id);
-    log::debug!("conexão {} encerrada", id.0);
+    drop(guard);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use super::*;
+
+    const IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    type Rx = mpsc::Receiver<String>;
+
+    fn conn(hub: &mut Hub) -> (ConnId, Rx) {
+        let (tx, rx) = mpsc::channel(QUEUE_CAPACITY);
+        (hub.register(tx), rx)
+    }
+
+    fn next(rx: &mut Rx) -> Option<ServerMsg> {
+        rx.try_recv()
+            .ok()
+            .map(|json| serde_json::from_str(&json).unwrap())
+    }
+
+    fn closed(rx: &mut Rx) -> bool {
+        matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Disconnected))
+    }
+
+    fn req(hub: &mut Hub, id: ConnId, msg: &ClientMsg) {
+        hub.handle_msg(id, IP, msg.clone());
+    }
+
+    /// Sala com Host e um convidado; as filas já foram lidas até aqui.
+    fn room(hub: &mut Hub) -> [(ConnId, Rx); 2] {
+        let (host, mut host_rx) = conn(hub);
+        let (guest, mut guest_rx) = conn(hub);
+        req(hub, host, &ClientMsg::CreateRoom);
+        let Some(ServerMsg::RoomCreated { code, .. }) = next(&mut host_rx) else {
+            panic!("esperava room_created");
+        };
+        req(hub, guest, &ClientMsg::JoinRoom { code });
+        assert!(matches!(
+            next(&mut guest_rx),
+            Some(ServerMsg::Joined { .. })
+        ));
+        assert_eq!(
+            next(&mut host_rx),
+            Some(ServerMsg::PeerJoined { peer_id: guest })
+        );
+        [(host, host_rx), (guest, guest_rx)]
+    }
+
+    #[test]
+    fn flood_drops_target_that_does_not_read() {
+        let mut hub = Hub::default();
+        let [(host, mut host_rx), (guest, mut guest_rx)] = room(&mut hub);
+        // O Host para de ler; o convidado inunda.
+        for i in 0..(QUEUE_CAPACITY + 8) {
+            let data = serde_json::json!({ "n": i });
+            req(&mut hub, guest, &ClientMsg::Signal { to: host, data });
+        }
+        assert!(!hub.conns.contains_key(&host), "Host deveria ser derrubado");
+        // A fila do Host esvazia o que já tinha e fecha.
+        let mut queued = 0;
+        while next(&mut host_rx).is_some() {
+            queued += 1;
+        }
+        assert_eq!(queued, QUEUE_CAPACITY);
+        assert!(closed(&mut host_rx));
+        // O convidado não recebeu nada até a task do Host encerrar.
+        assert_eq!(next(&mut guest_rx), None);
+        hub.disconnect(host);
+        assert_eq!(next(&mut guest_rx), Some(ServerMsg::HostLeft));
+        // E segue funcionando.
+        req(&mut hub, guest, &ClientMsg::CreateRoom);
+        assert!(matches!(
+            next(&mut guest_rx),
+            Some(ServerMsg::RoomCreated { .. })
+        ));
+    }
+
+    #[test]
+    fn disconnect_is_idempotent() {
+        let mut hub = Hub::default();
+        let [(_, mut host_rx), (guest, _)] = room(&mut hub);
+        hub.disconnect(guest);
+        hub.disconnect(guest);
+        assert_eq!(
+            next(&mut host_rx),
+            Some(ServerMsg::PeerLeft { peer_id: guest })
+        );
+        assert_eq!(next(&mut host_rx), None);
+    }
 }
