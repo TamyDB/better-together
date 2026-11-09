@@ -22,16 +22,26 @@ pub const MAX_INPUTS_PER_SEC: u32 = 120;
 
 const INPUT_WINDOW: Duration = Duration::from_secs(1);
 const GUEST_FALLBACK_NAME: &str = "Convidado";
+/// `rejoin_token` 0 significa "sem reconexão".
+const NO_REJOIN_TOKEN: u64 = 0;
 
 struct Player {
     name: String,
     animal: Animal,
-    /// `None` para o Host, que nunca reconecta.
+    /// `None` para o Host e para quem entrou com token 0 ou repetido: nunca reconecta.
     rejoin_token: Option<u64>,
     /// Peer que controla o pet; `None` para o Host e para quem está dormindo.
     peer: Option<PeerId>,
     /// Quando o peer caiu; `Some` enquanto o pet dorme.
     asleep_since: Option<Instant>,
+}
+
+impl Player {
+    /// Dorme há mais de `SLEEP_TIMEOUT`: não religa mais e sai no próximo `tick`.
+    fn sleep_expired(&self, now: Instant) -> bool {
+        self.asleep_since
+            .is_some_and(|t| now.saturating_duration_since(t) > SLEEP_TIMEOUT)
+    }
 }
 
 /// Conexão de um convidado: no lobby (`player == None`) ou jogando.
@@ -132,10 +142,7 @@ impl HostSession {
         let expired: Vec<PlayerId> = self
             .players
             .iter()
-            .filter(|(_, p)| {
-                p.asleep_since
-                    .is_some_and(|t| now.saturating_duration_since(t) > SLEEP_TIMEOUT)
-            })
+            .filter(|(_, p)| p.sleep_expired(now))
             .map(|(id, _)| *id)
             .collect();
         if !expired.is_empty() {
@@ -200,7 +207,14 @@ impl HostSession {
                     rejoin_token,
                 },
                 Channel::Events,
-            ) => self.on_hello(peer, protocol_version, &name, desired_animal, rejoin_token),
+            ) => self.on_hello(
+                peer,
+                protocol_version,
+                &name,
+                desired_animal,
+                rejoin_token,
+                now,
+            ),
             (GuestMsg::Input(frame), Channel::Input) => {
                 self.on_input(peer, frame, now);
                 Vec::new()
@@ -219,6 +233,7 @@ impl HostSession {
         name: &str,
         desired: Animal,
         token: u64,
+        now: Instant,
     ) -> Vec<Out> {
         if self.peers.get(&peer).is_some_and(|p| p.player.is_some()) {
             log::debug!("peer {peer}: Hello repetido; ignorado");
@@ -227,7 +242,7 @@ impl HostSession {
         if let Err(reason) = check_version(version) {
             return vec![send(peer, Channel::Events, &HostMsg::Reject(reason))];
         }
-        if let Some(id) = self.sleeping_with_token(token) {
+        if let Some(id) = self.rejoinable(token, now) {
             return self.rejoin(peer, id);
         }
         let Some(id) = (1..=3)
@@ -260,7 +275,7 @@ impl HostSession {
             Player {
                 name: sanitize_name(name, GUEST_FALLBACK_NAME),
                 animal: desired,
-                rejoin_token: Some(token),
+                rejoin_token: self.fresh_token(token),
                 peer: Some(peer),
                 asleep_since: None,
             },
@@ -268,13 +283,22 @@ impl HostSession {
         self.bind(peer, id)
     }
 
-    /// Religa um jogador dormindo a um novo peer, com o animal e o nome originais.
+    /// Religa o jogador a um novo peer, com o animal e o nome originais. Se dormia, acorda o
+    /// pet; se ainda estava ligado a outro peer, esse peer é dado como morto e esquecido.
     fn rejoin(&mut self, peer: PeerId, id: PlayerId) -> Vec<Out> {
-        if let Some(player) = self.players.get_mut(&id) {
-            player.peer = Some(peer);
-            player.asleep_since = None;
+        let Some(player) = self.players.get_mut(&id) else {
+            return Vec::new();
+        };
+        if let Some(old) = player.peer.replace(peer) {
+            log::debug!(
+                "peer {old} substituído pelo peer {peer} no jogador {}",
+                id.0
+            );
+            self.peers.remove(&old);
         }
-        self.world.set_asleep(id, false);
+        if player.asleep_since.take().is_some() {
+            self.world.set_asleep(id, false);
+        }
         self.bind(peer, id)
     }
 
@@ -333,11 +357,22 @@ impl HostSession {
         self.players_changed()
     }
 
-    fn sleeping_with_token(&self, token: u64) -> Option<PlayerId> {
+    /// Jogador que o token religa: dormindo há no máximo `SLEEP_TIMEOUT`, ou acordado (o peer
+    /// antigo ainda não caiu, p.ex. ICE demorando a falhar). Token 0 nunca religa.
+    fn rejoinable(&self, token: u64, now: Instant) -> Option<PlayerId> {
+        if token == NO_REJOIN_TOKEN {
+            return None;
+        }
         self.players
             .iter()
-            .find(|(_, p)| p.asleep_since.is_some() && p.rejoin_token == Some(token))
+            .find(|(_, p)| p.rejoin_token == Some(token) && !p.sleep_expired(now))
             .map(|(id, _)| *id)
+    }
+
+    /// Token de reconexão para um jogador novo: 0 ou um token já em uso valem como nenhum.
+    fn fresh_token(&self, token: u64) -> Option<u64> {
+        let in_use = self.players.values().any(|p| p.rejoin_token == Some(token));
+        (token != NO_REJOIN_TOKEN && !in_use).then_some(token)
     }
 
     fn lobby_msg(&self) -> HostMsg {
@@ -584,6 +619,12 @@ mod tests {
             vec![(4, Channel::Events, HostMsg::Reject(RejectReason::RoomFull))]
         );
         assert_eq!(s.roster().len(), 4);
+
+        // Sala cheia com um jogador dormindo: o token dele ainda religa.
+        s.handle(NetIn::PeerClosed(2), now);
+        let outs = s.handle(recv(4, Channel::Events, hello("D", Animal::Duck, 2)), now);
+        assert_eq!(welcome_of(&outs, 4), Some((PlayerId(2), Animal::Horse)));
+        assert_eq!(s.roster().len(), 4);
     }
 
     #[test]
@@ -739,25 +780,99 @@ mod tests {
         assert_eq!(pet(&s, 1).unwrap().last_input_seq, 1);
     }
 
+    /// Devolve `(player_id, animal)` do `Welcome` mandado ao peer, se houver.
+    fn welcome_of(outs: &[Out], peer: PeerId) -> Option<(PlayerId, Animal)> {
+        to_peer(outs, peer).into_iter().find_map(|(c, m)| match m {
+            HostMsg::Welcome {
+                player_id, animal, ..
+            } if c == Channel::Events => Some((player_id, animal)),
+            _ => None,
+        })
+    }
+
     #[test]
-    fn rejoin_token_of_awake_player_is_normal_hello() {
+    fn rejoin_while_old_peer_alive() {
         let mut s = session();
         let now = Instant::now();
         join(&mut s, 7, Animal::Capybara, 42, now);
-        let outs = join(&mut s, 8, Animal::Horse, 42, now);
-        match &to_peer(&outs, 8)[0] {
-            (Channel::Events, HostMsg::Welcome { player_id, .. }) => {
-                assert_eq!(*player_id, PlayerId(2))
-            }
-            other => panic!("esperava Welcome, veio {other:?}"),
+        s.handle(recv(7, Channel::Input, input(5, 1)), now);
+
+        // O peer antigo ainda não caiu (ICE demora); o novo peer religa o mesmo jogador.
+        let outs = join(&mut s, 9, Animal::Horse, 42, now);
+        assert_eq!(welcome_of(&outs, 9), Some((PlayerId(1), Animal::Capybara)));
+        assert_eq!(s.roster().len(), 2);
+        assert!(!local_roster(&outs).unwrap()[1].asleep);
+        assert!(to_peer(&outs, 7).is_empty(), "peer antigo foi esquecido");
+
+        // O PeerClosed atrasado do peer antigo não põe o pet para dormir.
+        assert!(s.handle(NetIn::PeerClosed(7), now).is_empty());
+        assert!(!s.roster()[1].asleep);
+        assert_eq!(pet(&s, 1).unwrap().anim, AnimState::Idle);
+
+        // Input do peer antigo é ignorado; o novo controla o pet.
+        s.handle(recv(7, Channel::Input, input(6, 1)), now);
+        assert_eq!(pet(&s, 1).unwrap().last_input_seq, 5);
+        s.handle(recv(9, Channel::Input, input(7, 1)), now);
+        assert_eq!(pet(&s, 1).unwrap().last_input_seq, 7);
+
+        // Snapshots só vão para o peer novo.
+        let mut ticks = Vec::new();
+        for _ in 0..3 {
+            ticks.extend(s.tick(now));
         }
-        // Um segundo Hello do mesmo peer não cria outro jogador.
+        assert!(decode_out(&ticks).iter().all(|(p, _, _)| *p == 9));
+        assert_eq!(decode_out(&ticks).len(), 1);
+
+        // Um segundo Hello do peer que já tem Welcome continua sem efeito.
         let again = s.handle(
-            recv(8, Channel::Events, hello("B", Animal::Chicken, 9)),
+            recv(9, Channel::Events, hello("B", Animal::Chicken, 42)),
             now,
         );
         assert!(again.is_empty());
-        assert_eq!(s.roster().len(), 3);
+        assert_eq!(s.roster().len(), 2);
+    }
+
+    #[test]
+    fn duplicate_or_zero_token_not_rejoinable() {
+        let mut s = session();
+        let t0 = Instant::now();
+
+        // Token 0 = sem reconexão.
+        join(&mut s, 5, Animal::Horse, 0, t0);
+        s.handle(NetIn::PeerClosed(5), t0);
+        let outs = join(&mut s, 6, Animal::Horse, 0, t0);
+        assert_eq!(
+            to_peer(&outs, 6)[0],
+            (Channel::Events, HostMsg::Reject(RejectReason::AnimalTaken))
+        );
+
+        // Jogador 2 (Capybara, token 42) dorme e vence sem tick no meio: o token não religa
+        // mais, e o novo jogador com o mesmo token entra sem token de reconexão.
+        join(&mut s, 7, Animal::Capybara, 42, t0);
+        s.handle(NetIn::PeerClosed(7), t0);
+        let t1 = t0 + Duration::from_secs(31);
+        let outs = join(&mut s, 8, Animal::Chicken, 42, t1);
+        assert_eq!(welcome_of(&outs, 8), Some((PlayerId(3), Animal::Chicken)));
+        // O tick remove os jogadores 1 e 2, que dormem desde t0.
+        s.tick(t1);
+        assert!(pet(&s, 1).is_none() && pet(&s, 2).is_none());
+
+        // O jogador 3 cai; o token 42 duplicado não o religa: entra um jogador novo.
+        s.handle(NetIn::PeerClosed(8), t1);
+        let outs = join(&mut s, 9, Animal::Capybara, 42, t1);
+        assert_eq!(welcome_of(&outs, 9), Some((PlayerId(1), Animal::Capybara)));
+        assert!(s.roster().iter().any(|e| e.id == PlayerId(3) && e.asleep));
+    }
+
+    #[test]
+    fn expired_sleeper_not_rejoined_before_tick() {
+        let mut s = session();
+        let t0 = Instant::now();
+        join(&mut s, 7, Animal::Capybara, 42, t0);
+        s.handle(NetIn::PeerClosed(7), t0);
+        let outs = join(&mut s, 8, Animal::Chicken, 42, t0 + Duration::from_secs(31));
+        assert_ne!(welcome_of(&outs, 8), Some((PlayerId(1), Animal::Capybara)));
+        assert_eq!(pet(&s, 1).unwrap().anim, AnimState::Sleep);
     }
 
     #[test]
