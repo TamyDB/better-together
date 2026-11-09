@@ -2,13 +2,13 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use dm_protocol::{Animal, InputFrame, PlayerId, Snapshot, Vec2};
+use dm_protocol::{Animal, InputFrame, Snapshot, Vec2};
 use dm_sim::{consts::TICK_HZ, World};
 use tauri::{AppHandle, Emitter};
 
 use super::ticker::Ticker;
+use crate::session::HOST_PLAYER;
 
-pub const HOST_PLAYER: PlayerId = PlayerId(0);
 pub const SNAPSHOT_EVENT: &str = "sim://snapshot";
 const MAX_CATCH_UP: u32 = 5;
 

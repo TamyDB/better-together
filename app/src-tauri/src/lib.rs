@@ -2,6 +2,9 @@ mod input;
 mod overlay;
 mod pet_mode;
 mod runtime;
+// Ligada ao loop e ao WebRTC na Task 7.
+#[allow(dead_code)]
+mod session;
 mod tray;
 
 use std::sync::Arc;
