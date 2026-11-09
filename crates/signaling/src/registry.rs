@@ -8,6 +8,8 @@ use crate::{code, proto::SignalError, ConnId};
 
 pub const MAX_GUESTS: usize = 3;
 pub const MAX_ROOMS: usize = 1000;
+/// Tentativas de sortear um código sem colisão antes de desistir.
+const MAX_CODE_ATTEMPTS: usize = 32;
 
 struct Room {
     host: ConnId,
@@ -46,12 +48,10 @@ impl Registry {
         if self.rooms.len() >= MAX_ROOMS {
             return Err(SignalError::ServerFull);
         }
-        let code = loop {
-            let c = code::generate(rng);
-            if !self.rooms.contains_key(&c) {
-                break c;
-            }
-        };
+        let code = (0..MAX_CODE_ATTEMPTS)
+            .map(|_| code::generate(rng))
+            .find(|c| !self.rooms.contains_key(c))
+            .ok_or(SignalError::ServerFull)?;
         self.rooms.insert(
             code.clone(),
             Room {
@@ -187,5 +187,56 @@ mod tests {
             r.create(ConnId(5000), &mut rng),
             Err(SignalError::ServerFull)
         );
+    }
+
+    #[test]
+    fn leave_cleans_up() {
+        let mut r = Registry::new();
+        let mut rng = rng();
+        let host = ConnId(1);
+        let code = r.create(host, &mut rng).unwrap();
+        for g in 2..=4 {
+            r.join(ConnId(g), &code).unwrap();
+        }
+        r.leave(ConnId(2));
+        assert!(r.join(ConnId(5), &code).is_ok());
+        r.leave(host);
+        assert!(!r.can_signal(host, ConnId(3)));
+        assert!(!r.can_signal(ConnId(3), host));
+        let other = r.create(ConnId(10), &mut rng).unwrap();
+        assert!(r.join(ConnId(3), &other).is_ok());
+        assert!(r.create(ConnId(4), &mut rng).is_ok());
+        assert!(r.create(ConnId(5), &mut rng).is_ok());
+    }
+
+    #[test]
+    fn leave_host_frees_room_slot() {
+        let mut r = Registry::new();
+        let mut rng = rng();
+        for i in 0..MAX_ROOMS as u64 {
+            r.create(ConnId(i), &mut rng).unwrap();
+        }
+        r.leave(ConnId(0));
+        assert!(r.create(ConnId(5000), &mut rng).is_ok());
+    }
+
+    #[test]
+    fn rejects_double_create_and_garbage() {
+        let mut r = Registry::new();
+        let mut rng = rng();
+        r.create(ConnId(1), &mut rng).unwrap();
+        assert_eq!(
+            r.create(ConnId(1), &mut rng),
+            Err(SignalError::AlreadyInRoom)
+        );
+        assert_eq!(r.join(ConnId(2), "lixo"), Err(SignalError::RoomNotFound));
+    }
+
+    #[test]
+    fn collision_picks_another_code() {
+        let mut r = Registry::new();
+        let a = r.create(ConnId(1), &mut StdRng::seed_from_u64(1)).unwrap();
+        let b = r.create(ConnId(2), &mut StdRng::seed_from_u64(1)).unwrap();
+        assert_ne!(a, b);
     }
 }

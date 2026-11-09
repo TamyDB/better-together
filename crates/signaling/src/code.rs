@@ -19,11 +19,11 @@ pub fn generate(rng: &mut impl Rng) -> String {
 
 /// Aceita "pato 4821", "PATO4821", " Pato-4821 " etc. e devolve "PATO-4821".
 pub fn normalize(input: &str) -> Option<String> {
-    let s: String = input
-        .chars()
-        .filter(|c| !c.is_whitespace())
-        .collect::<String>()
-        .to_uppercase();
+    if input.len() > 32 {
+        return None;
+    }
+    let s: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+    let s = s.to_ascii_uppercase();
     let (word, digits) = match s.split_once('-') {
         Some((w, d)) => (w, d),
         None if s.len() >= 4 && s.is_char_boundary(4) => s.split_at(4),
@@ -73,5 +73,7 @@ mod tests {
         for bad in ["PAT-4821", "PATO-48210", "PATO-48A1", ""] {
             assert_eq!(normalize(bad), None, "{bad}");
         }
+        assert_eq!(normalize("ßß-4821"), None);
+        assert_eq!(normalize(&"A".repeat(100)), None);
     }
 }
