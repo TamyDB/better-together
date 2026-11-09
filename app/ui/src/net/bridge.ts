@@ -51,8 +51,14 @@ function waitFor<T>(sig: SignalingClient, pick: (m: ServerMsg) => T | undefined)
 
 const SERVER_TIMEOUT = "Não foi possível conectar ao servidor";
 
-function connectSignaling(url: string): Promise<SignalingClient> {
-  return withTimeout(SignalingClient.connect(url), CONNECT_TIMEOUT_MS, SERVER_TIMEOUT);
+// O timeout (e o fechamento do socket tardio) vive em `SignalingClient.connect`.
+async function connectSignaling(url: string, cancelled: () => boolean): Promise<SignalingClient> {
+  const s = await SignalingClient.connect(url);
+  if (cancelled()) {
+    s.close(); // `stop()` chegou durante a conexão
+    throw new Error("Cancelado");
+  }
+  return s;
 }
 
 export async function startHostNet(
@@ -112,9 +118,8 @@ export async function startHostNet(
       if (!isChannelName(channel)) return;
       peers.get(peer)?.link.send(channel, Uint8Array.from(bytes));
     });
-    const s = await connectSignaling(cfg.signaling_url);
+    const s = await connectSignaling(cfg.signaling_url, () => stopped);
     sig = s;
-    if (stopped) throw new Error("Cancelado");
     s.send({ type: "create_room" });
     const code = await waitFor(s, (m) => (m.type === "room_created" ? m.code : undefined));
     s.onMessage((m) => {
@@ -165,7 +170,7 @@ export async function startGuestNet(cfg: NetConfig, code: string): Promise<NetSe
       if (peer !== HOST_PEER || !isChannelName(channel)) return;
       link?.send(channel, Uint8Array.from(bytes));
     });
-    const s = await connectSignaling(cfg.signaling_url);
+    const s = await connectSignaling(cfg.signaling_url, () => stopped);
     sig = s;
     s.send({ type: "join_room", code: norm });
     const hostId = await waitFor(s, (m) => (m.type === "joined" ? m.host_id : undefined));

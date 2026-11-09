@@ -1,3 +1,5 @@
+import { CONNECT_TIMEOUT_MS } from "./timeout";
+
 // Espelho de `crates/signaling/src/proto.rs` e `code.rs`.
 
 export type SignalError =
@@ -119,17 +121,31 @@ export class SignalingClient {
     if (ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) this.closed = true;
   }
 
-  static connect(url: string): Promise<SignalingClient> {
+  /** Abre o socket; se não abrir em `timeoutMs`, fecha o socket e rejeita (sem cliente órfão). */
+  static connect(url: string, timeoutMs: number = CONNECT_TIMEOUT_MS): Promise<SignalingClient> {
+    const fail = "Não foi possível conectar ao servidor";
     return new Promise((resolve, reject) => {
       let ws: WebSocket;
       try {
         ws = new WebSocket(url);
       } catch {
-        reject(new Error("Não foi possível conectar ao servidor"));
+        reject(new Error(fail));
         return;
       }
-      ws.onopen = () => resolve(new SignalingClient(ws));
-      ws.onerror = () => reject(new Error("Não foi possível conectar ao servidor"));
+      const timer = setTimeout(() => {
+        ws.onopen = null;
+        ws.onerror = null;
+        ws.close();
+        reject(new Error(fail));
+      }, timeoutMs);
+      ws.onopen = () => {
+        clearTimeout(timer);
+        resolve(new SignalingClient(ws));
+      };
+      ws.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error(fail));
+      };
     });
   }
 

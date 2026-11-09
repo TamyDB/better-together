@@ -70,3 +70,39 @@ describe("SignalingClient.onClose", () => {
     }
   });
 });
+
+describe("SignalingClient.connect timeout", () => {
+  it("fecha o socket que abriria tarde e rejeita", async () => {
+    const { SignalingClient } = await import("./signaling");
+    let inst!: { closed: boolean; onopen: (() => void) | null };
+    class FakeWS {
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      readyState = 0;
+      closed = false;
+      onopen: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor() {
+        inst = this;
+      }
+      close() {
+        this.closed = true;
+      }
+    }
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", FakeWS);
+    try {
+      const p = SignalingClient.connect("ws://x", 1000);
+      const assertion = expect(p).rejects.toThrow("Não foi possível conectar ao servidor");
+      await vi.advanceTimersByTimeAsync(1000);
+      await assertion;
+      expect(inst.closed).toBe(true);
+      expect(inst.onopen).toBeNull();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+});
