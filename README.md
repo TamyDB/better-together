@@ -63,10 +63,11 @@ as travessuras acima, e todas têm limite de tempo e de quantidade. O Host pode:
 Os convidados nunca recebem títulos de janelas nem nomes de programas do Host.
 
 > [!NOTE]
-> **Estado atual: marco M2 (rede), com o teste ponta a ponta manual ainda pendente.** Dá
-> para criar uma sala, entrar com o código, escolher o animal e ver os bichinhos de todos
-> se mexendo. O vídeo da tela do Host chega no M3: por enquanto o convidado vê um fundo
-> liso com os bichinhos. Vídeo, chat e travessuras chegam nos próximos marcos (veja o
+> **Estado atual: marco M2 (rede).** A implementação está pronta, mas ainda não foi
+> validada ponta a ponta em janelas reais (nem no Windows). Dá para criar uma sala, entrar
+> com o código, escolher o animal e ver os bichinhos de todos se mexendo. O vídeo da tela
+> do Host chega no M3: por enquanto o convidado vê um painel escuro com um aviso, com os
+> bichinhos por cima. Vídeo, chat e travessuras chegam nos próximos marcos (veja o
 > [Roadmap](#-roadmap)).
 
 ---
@@ -129,13 +130,38 @@ Ainda não existe servidor público (ele chega no M6). Para jogar, alguém preci
 **sinalização**, o servidor leve que cria as salas e apresenta os PCs uns aos outros. Depois
 disso o jogo em si é P2P.
 
-```sh
-# 1. sinalização (padrão 127.0.0.1:8787; use BT_SIGNALING_ADDR para mudar)
-cargo run -p dm-signaling
-BT_SIGNALING_ADDR=0.0.0.0:8787 cargo run -p dm-signaling
+Para gerar o executável de dev, rode `pnpm --dir app tauri build --debug --no-bundle`
+(sai em `target/debug/`). Sem `--debug`, o executável sai em `target/release/`.
 
-# 2. app (Host e convidados), apontando para a sinalização
+**Sinalização** (escolha uma das alternativas):
+
+```sh
+# Linux/bash: só nesta máquina (padrão 127.0.0.1:8787)
+cargo run -p dm-signaling
+
+# Linux/bash: aberta para a rede
+BT_SIGNALING_ADDR=0.0.0.0:8787 cargo run -p dm-signaling
+```
+
+```powershell
+# PowerShell: aberta para a rede
+$env:BT_SIGNALING_ADDR="0.0.0.0:8787"; cargo run -p dm-signaling
+```
+
+> [!WARNING]
+> `0.0.0.0` expõe a sinalização na rede em `ws://`, **sem TLS**, e pede liberação no
+> firewall. Use só com amigos.
+
+**App** (Host e convidados), apontando para a sinalização:
+
+```sh
+# Linux/bash
 BT_SIGNALING_URL=ws://meu-servidor:8787/ws ./target/debug/better-together
+```
+
+```powershell
+# PowerShell
+$env:BT_SIGNALING_URL="ws://meu-servidor:8787/ws"; .\target\debug\better-together.exe
 ```
 
 | Variável | Onde | Padrão |
@@ -150,14 +176,18 @@ O TURN só é usado se as **três** variáveis estiverem definidas.
 
 1. `cargo run -p dm-signaling`
 2. Host: `DM_DEV_WINDOW=1 ./target/debug/better-together`, com nome, animal e "Criar sala".
-3. Convidado: `./target/debug/better-together`, com o código da sala e um animal livre.
+   O `DM_DEV_WINDOW=1` é só para desenvolver no Linux (janela comum no lugar da overlay).
+3. Convidado: `./target/debug/better-together`, com o código da sala; depois escolha um
+   animal livre no lobby.
 
-Para gerar o executável de dev, rode `pnpm --dir app tauri build --debug --no-bundle`.
+O roteiro completo de teste manual está em [`docs/e2e-m2.md`](docs/e2e-m2.md).
 
 Pela internet, o Host e os convidados precisam alcançar a sinalização, então ela tem que
 ser hospedada por alguém (uma VPS, ou uma porta liberada no roteador). O código da sala
 (como `PATO-4821`) vale **enquanto o Host estiver conectado**: se o Host sair, a sala some.
-Se a rede de alguém bloquear a conexão direta, será preciso um servidor TURN próprio.
+A sala depende da conexão do Host com a sinalização: se ela cair, novos amigos não entram,
+mas quem já está na sala segue conectado. Se a rede de alguém bloquear a conexão direta,
+será preciso um servidor TURN próprio.
 
 ### Controles
 
@@ -263,12 +293,13 @@ docs/superpowers/
 ### Testes
 
 ```sh
-cargo test --workspace                              # protocolo, simulação, app
+cargo test --workspace                              # protocolo, simulação, sinalização, app
 cargo clippy --workspace --all-targets -- -D warnings
 pnpm --dir app test                                 # render (Vitest)
 ```
 
-A CI roda tudo isso no **Ubuntu** e no **Windows**, onde também faz o build do app.
+A CI roda os testes Rust e o clippy no **Ubuntu** e no **Windows**, onde também faz o build
+do app. `cargo fmt`, `tsc` e o Vitest rodam só no Ubuntu.
 
 ### Documentação
 
