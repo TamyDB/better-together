@@ -1,4 +1,4 @@
-import type { Animal, PetState } from "../types";
+import type { AnimState, Animal, PetState } from "../types";
 
 export const PET_SIZE = 64;
 
@@ -8,6 +8,11 @@ export const LOOK: Record<Animal, { color: string; letter: string }> = {
   horse: { color: "#5B3A29", letter: "V" },
   chicken: { color: "#F4F1EA", letter: "G" },
 };
+
+/** Deslocamento vertical do quique: só andando/correndo (dormindo fica parado). */
+export function bounceOffset(anim: AnimState, nowMs: number): number {
+  return anim === "idle" || anim === "sleep" ? 0 : Math.abs(Math.sin(nowMs / 90)) * 4;
+}
 
 /** Desenha o placeholder com os pés em `at` (pixels CSS). */
 export function drawPet(
@@ -20,7 +25,7 @@ export function drawPet(
   const sleeping = pet.anim === "sleep";
   const color = sleeping ? "#8A8A8A" : LOOK[pet.animal].color;
   const r = PET_SIZE / 2;
-  const bounce = pet.anim === "idle" ? 0 : Math.abs(Math.sin(performance.now() / 90)) * 4;
+  const bounce = bounceOffset(pet.anim, performance.now());
 
   ctx.save();
   ctx.translate(at.x, at.y - r - bounce);

@@ -15,7 +15,7 @@ use dm_protocol::Animal;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-use app_state::{parse_recv, AppState, Mode};
+use app_state::{parse_recv, AppState, Ended, Mode};
 use input::keys::Key;
 use net_config::NetConfig;
 use pet_mode::{PetMode, KEEP_ALIVE_MS};
@@ -131,17 +131,25 @@ fn toggle_pet_mode(state: State<'_, AppState>) -> Result<(), String> {
     state.toggle_pet()
 }
 
+/// O convidado entrou no viewer: a janela `main` passa a 1280x720.
+#[tauri::command(async)]
+fn enter_viewer(app: AppHandle) {
+    overlay::resize_main(&app, overlay::VIEWER_SIZE);
+}
+
 // `async` pelo mesmo motivo do `host_start`: mexe em janelas.
 #[tauri::command(async)]
 fn session_reset(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let was_host = state.end_session()?;
-    if was_host {
+    let ended = state.end_session()?;
+    if ended == Ended::Host {
         if let Err(e) = app.global_shortcut().unregister(pet_mode_shortcut()) {
             log::debug!("atalho do modo bichinho não removido: {e}");
         }
+        overlay::close_overlay(&app);
+    }
+    if ended != Ended::None {
         overlay::resize_main(&app, overlay::LAUNCHER_SIZE);
     }
-    overlay::close_overlay(&app);
     Ok(())
 }
 
@@ -172,6 +180,7 @@ pub fn run() {
             key_event,
             toggle_pet_mode,
             session_reset,
+            enter_viewer,
         ])
         // A sessão vive na janela `main`: fechá-la encerra o app (sem overlay/hook órfãos).
         .on_window_event(|window, event| {

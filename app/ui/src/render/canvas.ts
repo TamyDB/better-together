@@ -5,6 +5,8 @@ import { drawPet, PET_SIZE } from "./placeholder";
 export interface Renderer {
   update(snapshot: Snapshot): void;
   setRoster(roster: RosterEntry[]): void;
+  /** Para o loop de frames e remove o listener de resize. */
+  stop(): void;
 }
 
 export interface Area {
@@ -26,6 +28,7 @@ export function startRenderer(canvas: HTMLCanvasElement, opts: RendererOpts = {}
   let names = new Map<number, string>();
   let cssW = 0;
   let cssH = 0;
+  let running = true;
 
   const resize = () => {
     cssW = canvas.clientWidth || window.innerWidth;
@@ -38,6 +41,7 @@ export function startRenderer(canvas: HTMLCanvasElement, opts: RendererOpts = {}
   resize();
 
   const frame = () => {
+    if (!running) return;
     const dpr = window.devicePixelRatio;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cssW, cssH);
@@ -52,6 +56,10 @@ export function startRenderer(canvas: HTMLCanvasElement, opts: RendererOpts = {}
 
   return {
     update: (s) => (latest = s),
+    stop: () => {
+      running = false;
+      window.removeEventListener("resize", resize);
+    },
     setRoster: (r) => (names = new Map(r.map((e) => [e.id, e.name]))),
   };
 }

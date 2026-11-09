@@ -5,8 +5,8 @@ body {
   font: 14px system-ui, sans-serif;
 }
 /* Overlay: transparente, só o canvas dos bichinhos. */
-body.overlay { background: transparent; }
-body.overlay canvas { display: block; width: 100vw; height: 100vh; background: transparent; }
+html.overlay, html.overlay body { background: transparent; }
+html.overlay canvas { display: block; width: 100vw; height: 100vh; background: transparent; }
 
 #app { box-sizing: border-box; height: 100%; padding: 16px; display: flex; flex-direction: column; gap: 10px; overflow: auto; }
 h1 { margin: 0; font-size: 18px; }

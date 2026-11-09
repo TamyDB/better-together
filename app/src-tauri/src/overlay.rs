@@ -12,6 +12,8 @@ const MAIN_URL: &str = "index.html?view=main";
 const OVERLAY_URL: &str = "index.html?view=overlay";
 /// Janela `main` como launcher.
 pub const LAUNCHER_SIZE: (f64, f64) = (420.0, 560.0);
+/// Janela `main` como viewer do convidado.
+pub const VIEWER_SIZE: (f64, f64) = (1280.0, 720.0);
 /// Janela `main` como painel do Host.
 pub const PANEL_SIZE: (f64, f64) = (360.0, 260.0);
 const OVERLAY_GONE_POLLS: u32 = 25;

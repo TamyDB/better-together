@@ -217,10 +217,11 @@ async function guestFlow(name: string, code: string): Promise<void> {
     inViewer = false;
     const back = el("button", { cls: "secondary", text: "Sair" });
     back.onclick = leave;
+    const shown = message ?? (taken.length >= ANIMALS.length ? "Sala cheia" : null);
     show(
       "",
       el("h1", { text: "Escolha seu bichinho" }),
-      message ? el("div", { cls: "error", text: message }) : null,
+      shown ? el("div", { cls: "error", text: shown }) : null,
       el(
         "div",
         { cls: "cards" },
@@ -229,6 +230,7 @@ async function guestFlow(name: string, code: string): Promise<void> {
             a,
             () => {
               message = null;
+              root().querySelector(".error")?.remove();
               invoke("guest_choose", { name, animal: a }).catch((e) => {
                 message = errorText(e);
                 lobby();
@@ -252,6 +254,8 @@ async function guestFlow(name: string, code: string): Promise<void> {
       }),
       await listen<{ aspect: number }>("session://welcome", (e) => {
         inViewer = true;
+        viewer?.dispose();
+        invoke("enter_viewer").catch(() => {});
         viewer = showViewer(e.payload.aspect, leave);
         viewer.setRoster(roster);
       }),
@@ -342,6 +346,7 @@ function showViewer(aspect: number, leave: () => void): ViewerHandle {
     setRoster: (r) => renderer.setRoster(r),
     dispose: () => {
       disposed = true;
+      renderer.stop();
       unlisten?.();
       window.removeEventListener("resize", layout);
       window.removeEventListener("keydown", onDown);

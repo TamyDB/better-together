@@ -13,6 +13,14 @@ use crate::session::net::{NetIn, PeerId};
 
 const SESSION_ACTIVE: &str = "já existe uma sessão ativa";
 
+/// O que havia ao encerrar a sessão (`AppState::end_session`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    None,
+    Host,
+    Guest,
+}
+
 pub enum Mode {
     Launcher,
     Host {
@@ -169,8 +177,8 @@ impl AppState {
     }
 
     /// Volta ao `Launcher`. Ao retornar, a thread da sessão já não tem nenhum `Sender` e sai
-    /// na próxima passagem; `Ok(true)` indica que a sessão era de Host.
-    pub fn end_session(&self) -> Result<bool, String> {
+    /// na próxima passagem; o retorno diz se havia sessão de Host, de Convidado ou nenhuma.
+    pub fn end_session(&self) -> Result<Ended, String> {
         let previous = {
             let mut mode = lock(&self.mode);
             if self.starting.load(Ordering::Acquire) {
@@ -178,13 +186,17 @@ impl AppState {
             }
             std::mem::replace(&mut *mode, Mode::Launcher)
         };
-        let was_host = matches!(previous, Mode::Host { .. });
+        let ended = match previous {
+            Mode::Launcher => Ended::None,
+            Mode::Host { .. } => Ended::Host,
+            Mode::Guest { .. } => Ended::Guest,
+        };
         if let Mode::Host { pet_mode, .. } = &previous {
             // Depois do `Launcher` publicado: um toggle tardio já não encontra o modo Host.
             pet_mode.exit();
             self.pet_sink.clear();
         }
-        Ok(was_host)
+        Ok(ended)
     }
 
     /// Só no modo Host. Sob o lock de `Mode` para não religar o modo bichinho depois de um
@@ -331,7 +343,7 @@ mod tests {
     fn app_state_reset_closes_host_channel() {
         let (state, rx) = host_state();
         state.toggle_pet().unwrap();
-        assert_eq!(state.end_session(), Ok(true));
+        assert_eq!(state.end_session(), Ok(Ended::Host));
         assert_eq!(lock(&state.mode).kind(), "launcher");
         assert!(!state.pet_mode.is_on());
         // O `PetMode` segue vivo (hook/keep-alive), mas sem nenhum `Sender` da sessão.
@@ -344,8 +356,13 @@ mod tests {
         let state = AppState::new();
         let (handle, rx) = guest_handle();
         state.enter_guest(|| handle).unwrap();
-        assert_eq!(state.end_session(), Ok(false));
+        assert_eq!(state.end_session(), Ok(Ended::Guest));
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Disconnected)));
+    }
+
+    #[test]
+    fn app_state_reset_from_launcher_is_none() {
+        assert_eq!(AppState::new().end_session(), Ok(Ended::None));
     }
 
     #[test]
