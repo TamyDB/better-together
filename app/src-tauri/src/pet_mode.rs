@@ -98,6 +98,8 @@ impl PetMode {
     /// como tecla de movimento: não mexe no input nem no keep-alive.
     fn on_emote_key(&self, emote: Emote, down: bool) {
         let mut inner = self.inner.lock().unwrap();
+        // Com o modo desligado nem o key-up é registrado: não precisa, porque o `toggle` que
+        // religa o modo zera o `EmoteKeys`, e nenhuma tecla fica "segurada" de antes.
         if !self.is_on() {
             return;
         }

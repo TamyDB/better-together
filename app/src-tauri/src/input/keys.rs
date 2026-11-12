@@ -337,6 +337,27 @@ mod tests {
         assert_eq!(s, 0);
     }
 
+    #[test]
+    fn swallowed_key_up_with_pet_mode_inactive_is_swallowed_forwarded_and_cleared() {
+        // O hook passa `pet_mode = false` quando o modo é desligado ou quando uma janela do
+        // próprio app ganha o foco com a tecla segurada: o key-up ainda é engolido (o sistema
+        // não viu o key-down), vai ao `PetMode` (o pet não fica andando) e o bit some.
+        let keys = [Key::W, Key::A, Key::S, Key::D, Key::Esc]
+            .into_iter()
+            .chain(Emote::ALL.map(Key::Emote));
+        for key in keys {
+            let other = swallow_bit(Key::A) | swallow_bit(Key::Emote(Emote::Question));
+            let held = other | swallow_bit(key);
+            let (s, d) = filter_key(held, false, Some(key), false, false);
+            assert!(d.swallow && d.forward, "{key:?}");
+            assert_eq!(s, held & !swallow_bit(key), "{key:?}");
+            // Com o bit já limpo, o key-down seguinte com o modo inativo é do sistema.
+            let (s2, d) = filter_key(s, false, Some(key), true, false);
+            assert!(!d.swallow && !d.forward, "{key:?}");
+            assert_eq!(s2, s, "{key:?}");
+        }
+    }
+
     fn on(state: u16, key: Key, down: bool, modifier: bool) -> (u16, HookDecision) {
         filter_key(state, true, Some(key), down, modifier)
     }
