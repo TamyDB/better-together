@@ -15,6 +15,7 @@ import {
   GUEST_PAUSED_TEXT,
   GUEST_WAITING_TEXT,
   hostVideoText,
+  STALL_MS,
   type VideoState,
 } from "../net/video";
 import { startRenderer } from "../render/canvas";
@@ -29,6 +30,8 @@ const VIEWER_W = 1280;
 const VIEWER_H = 720;
 const OVERLAY_IN_VIDEO =
   "Seu Windows não esconde os bichinhos do vídeo: eles vão aparecer duplicados";
+/** Intervalo da contagem de quadros quando não há `requestVideoFrameCallback`. */
+const FRAME_POLL_MS = 500;
 
 /** Resposta do `host_start`. */
 interface HostStarted {
@@ -438,6 +441,67 @@ async function guestFlow(name: string, code: string): Promise<void> {
   }
 }
 
+/**
+ * Vigia os quadros do `<video>`: sem quadro novo por `STALL_MS` chama `onStall`; cada quadro
+ * chama `onFrame`. No Chromium a track remota não emite `mute` quando o Host pausa
+ * (`replaceTrack(null)` sem renegociar): o vídeo parado é o sinal. Sem como contar quadros,
+ * não vigia. Devolve o cancelamento, que não deixa timer vivo.
+ */
+function watchFrames(video: HTMLVideoElement, onFrame: () => void, onStall: () => void): () => void {
+  let stall: ReturnType<typeof setTimeout> | null = null;
+  const clearStall = () => {
+    if (stall !== null) clearTimeout(stall);
+    stall = null;
+  };
+  const arm = () => {
+    clearStall();
+    stall = setTimeout(() => {
+      stall = null;
+      onStall();
+    }, STALL_MS);
+  };
+  const frame = () => {
+    arm();
+    onFrame();
+  };
+
+  if (typeof video.requestVideoFrameCallback === "function") {
+    let stopped = false;
+    let handle = 0;
+    const next = () => {
+      handle = video.requestVideoFrameCallback(() => {
+        if (stopped) return;
+        frame();
+        next();
+      });
+    };
+    arm();
+    next();
+    return () => {
+      stopped = true;
+      video.cancelVideoFrameCallback?.(handle);
+      clearStall();
+    };
+  }
+  if (typeof video.getVideoPlaybackQuality === "function") {
+    const count = () => video.getVideoPlaybackQuality().totalVideoFrames;
+    let seen = count();
+    const poll = setInterval(() => {
+      const n = count();
+      if (n !== seen) {
+        seen = n;
+        frame();
+      }
+    }, FRAME_POLL_MS);
+    arm();
+    return () => {
+      clearInterval(poll);
+      clearStall();
+    };
+  }
+  return () => {};
+}
+
 interface ViewerHandle {
   setRoster(r: RosterEntry[]): void;
   /** Liga a track do Host ao `<video>`; a mesma track pode ser religada num viewer novo. */
@@ -507,16 +571,29 @@ function showViewer(aspect: number, leave: () => void): ViewerHandle {
   window.addEventListener("keyup", onUp);
   window.addEventListener("blur", onBlur);
 
-  // Aguardando até o primeiro `playing`; depois disso, `mute` da track é o Host pausando.
+  // Aguardando até o primeiro `playing`; depois disso, quadros parados (ou `mute` da track,
+  // como reforço) são o Host pausando.
   let track: MediaStreamTrack | null = null;
   let played = false;
+  let unwatch: (() => void) | null = null;
   const showStatus = (text: string | null) => {
     status.hidden = text === null;
     if (text !== null) status.textContent = text;
   };
+  const stopWatch = () => {
+    unwatch?.();
+    unwatch = null;
+  };
   const onPlaying = () => {
     played = true;
     showStatus(null);
+    unwatch ??= watchFrames(
+      video,
+      () => {
+        if (!status.hidden) showStatus(null);
+      },
+      () => showStatus(GUEST_PAUSED_TEXT),
+    );
   };
   const onMute = () => {
     if (played) showStatus(GUEST_PAUSED_TEXT);
@@ -536,6 +613,7 @@ function showViewer(aspect: number, leave: () => void): ViewerHandle {
     setVideo: (t) => {
       if (disposed || t === track) return;
       detach();
+      stopWatch();
       track = t;
       played = false;
       showStatus(GUEST_WAITING_TEXT);
@@ -546,6 +624,7 @@ function showViewer(aspect: number, leave: () => void): ViewerHandle {
     dispose: () => {
       disposed = true;
       detach();
+      stopWatch();
       video.removeEventListener("playing", onPlaying);
       video.srcObject = null;
       renderer.stop();

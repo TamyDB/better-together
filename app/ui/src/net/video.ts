@@ -50,3 +50,9 @@ export function hostVideoText(s: VideoState): string {
 
 export const GUEST_WAITING_TEXT = "Aguardando o vídeo do Host...";
 export const GUEST_PAUSED_TEXT = "Vídeo pausado pelo Host";
+
+/**
+ * Tempo sem quadro novo, depois de o vídeo tocar, para o convidado dar o vídeo como pausado.
+ * Exportado para calibrar no E2E (tela do Host parada não pode virar falso positivo).
+ */
+export const STALL_MS = 3000;

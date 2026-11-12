@@ -21,7 +21,7 @@ vi.mock("../render/canvas", () => ({
   startRenderer: () => ({ update() {}, setRoster() {}, stop() {} }),
 }));
 
-import { GUEST_PAUSED_TEXT, GUEST_WAITING_TEXT } from "../net/video";
+import { GUEST_PAUSED_TEXT, GUEST_WAITING_TEXT, STALL_MS } from "../net/video";
 import { startMainWindow } from "./main-window";
 
 /** DOM mínimo: só o que `main-window` usa, para exercitar a fiação sem navegador. */
@@ -599,6 +599,101 @@ describe("vídeo no viewer do convidado", () => {
     expect(videoEl()).not.toBe(first);
     expect(srcTracks()).toEqual([t]);
     expect(t.listenerCount()).toBe(2);
+  });
+
+  /** `requestVideoFrameCallback` falso: `frame()` entrega um quadro a quem pediu. */
+  function fakeFrames(v: FakeEl) {
+    const cbs = new Map<number, () => void>();
+    let next = 0;
+    Object.assign(v, {
+      requestVideoFrameCallback: (cb: () => void) => {
+        cbs.set(++next, cb);
+        return next;
+      },
+      cancelVideoFrameCallback: (id: number) => cbs.delete(id),
+    });
+    return {
+      frame() {
+        const due = [...cbs.values()];
+        cbs.clear();
+        for (const cb of due) cb();
+      },
+      pending: () => cbs.size,
+    };
+  }
+
+  it("quadros parados por STALL_MS mostram pausado; o próximo quadro esconde", async () => {
+    const t = fakeTrack();
+    await enterWithTrack(t);
+    emit("session://welcome", { animal: "duck", aspect: 2 });
+    const frames = fakeFrames(videoEl()!);
+    // Antes de tocar não há vigia: a espera é do "Aguardando".
+    await vi.advanceTimersByTimeAsync(STALL_MS * 2);
+    expect(videoStatus()!.textContent).toBe(GUEST_WAITING_TEXT);
+    videoEl()!.fire("playing");
+    expect(videoStatus()!.hidden).toBe(true);
+    await vi.advanceTimersByTimeAsync(STALL_MS - 1);
+    frames.frame();
+    await vi.advanceTimersByTimeAsync(STALL_MS - 1);
+    expect(videoStatus()!.hidden).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(videoStatus()!.hidden).toBe(false);
+    expect(videoStatus()!.textContent).toBe(GUEST_PAUSED_TEXT);
+    frames.frame();
+    expect(videoStatus()!.hidden).toBe(true);
+    // Parou de novo: avisa de novo.
+    await vi.advanceTimersByTimeAsync(STALL_MS);
+    expect(videoStatus()!.textContent).toBe(GUEST_PAUSED_TEXT);
+    expect(videoStatus()!.hidden).toBe(false);
+
+    // Com quadro chegando, há prazo armado e pedido de quadro pendente: o dispose cancela ambos.
+    frames.frame();
+    expect(vi.getTimerCount()).toBe(1);
+    expect(frames.pending()).toBe(1);
+    emit("session://host-lost");
+    expect(vi.getTimerCount()).toBe(0);
+    expect(frames.pending()).toBe(0);
+  });
+
+  it("sem requestVideoFrameCallback, conta os quadros a cada 500 ms", async () => {
+    const t = fakeTrack();
+    await enterWithTrack(t);
+    emit("session://welcome", { animal: "duck", aspect: 2 });
+    let total = 10;
+    Object.assign(videoEl()!, { getVideoPlaybackQuality: () => ({ totalVideoFrames: total }) });
+    videoEl()!.fire("playing");
+    await vi.advanceTimersByTimeAsync(STALL_MS);
+    expect(videoStatus()!.hidden).toBe(false);
+    expect(videoStatus()!.textContent).toBe(GUEST_PAUSED_TEXT);
+    total++;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(videoStatus()!.hidden).toBe(true);
+    emit("session://host-lost");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("sem como contar quadros, só o mute avisa", async () => {
+    const t = fakeTrack();
+    await enterWithTrack(t);
+    emit("session://welcome", { animal: "duck", aspect: 2 });
+    videoEl()!.fire("playing");
+    await vi.advanceTimersByTimeAsync(STALL_MS * 3);
+    expect(videoStatus()!.hidden).toBe(true);
+    t.fire("mute");
+    expect(videoStatus()!.textContent).toBe(GUEST_PAUSED_TEXT);
+  });
+
+  it("track nova volta a aguardar e desliga a vigia da anterior", async () => {
+    const t = fakeTrack();
+    await enterWithTrack(t);
+    emit("session://welcome", { animal: "duck", aspect: 2 });
+    const frames = fakeFrames(videoEl()!);
+    videoEl()!.fire("playing");
+    deliver(fakeTrack());
+    expect(frames.pending()).toBe(0);
+    await vi.advanceTimersByTimeAsync(STALL_MS * 2);
+    expect(videoStatus()!.textContent).toBe(GUEST_WAITING_TEXT);
+    expect(videoStatus()!.hidden).toBe(false);
   });
 
   it("host-lost solta o srcObject e os listeners da track", async () => {

@@ -4,6 +4,7 @@ import {
   CAPTURE_OPTIONS,
   GUEST_PAUSED_TEXT,
   GUEST_WAITING_TEXT,
+  STALL_MS,
   VIDEO_ENCODING,
   captureWarning,
   hostVideoText,
@@ -68,5 +69,9 @@ describe("textos", () => {
     expect(hostVideoText("ended")).toBe("Compartilhamento encerrado");
     expect(GUEST_WAITING_TEXT).toBe("Aguardando o vídeo do Host...");
     expect(GUEST_PAUSED_TEXT).toBe("Vídeo pausado pelo Host");
+  });
+
+  it("vídeo parado por 3 s vira pausado", () => {
+    expect(STALL_MS).toBe(3000);
   });
 });
