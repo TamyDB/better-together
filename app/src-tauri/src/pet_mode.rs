@@ -2,7 +2,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::input::keys::{Key, KeyState};
+use dm_protocol::Emote;
+
+use crate::input::keys::{EmoteKeys, Key, KeyState};
 use crate::runtime::host_loop::SimSink;
 
 /// Intervalo do reenvio do input enquanto o modo está ligado (abaixo do timeout da sim).
@@ -22,6 +24,7 @@ pub struct PetMode {
 #[derive(Default)]
 struct Inner {
     keys: KeyState,
+    emote_keys: EmoteKeys,
     seq: u32,
     last_key_at: Option<Instant>,
 }
@@ -46,6 +49,7 @@ impl PetMode {
         } else {
             let mut inner = self.inner.lock().unwrap();
             inner.keys = KeyState::default();
+            inner.emote_keys = EmoteKeys::default();
             self.on.store(true, Ordering::Release);
             self.sink.set_autonomous(false);
             log::info!("modo bichinho ligado");
@@ -59,6 +63,7 @@ impl PetMode {
         }
         let mut inner = self.inner.lock().unwrap();
         inner.keys = KeyState::default();
+        inner.emote_keys = EmoteKeys::default();
         Self::send(&self.sink, &mut inner);
         self.sink.set_autonomous(true);
         log::info!("modo bichinho desligado");
@@ -69,8 +74,8 @@ impl PetMode {
     }
 
     pub fn on_key_at(&self, key: Key, down: bool, now: Instant) {
-        // Emotes ainda não saem do modo bichinho; também não contam como tecla de movimento.
-        if matches!(key, Key::Emote(_)) {
+        if let Key::Emote(emote) = key {
+            self.on_emote_key(emote, down);
             return;
         }
         if key == Key::Esc {
@@ -87,6 +92,18 @@ impl PetMode {
         inner.keys.set(key, down);
         inner.last_key_at = Some(now);
         Self::send(&self.sink, &mut inner);
+    }
+
+    /// `1`–`6` com o modo ligado: um emote por key-down (o autorepeat não reenvia). Não conta
+    /// como tecla de movimento: não mexe no input nem no keep-alive.
+    fn on_emote_key(&self, emote: Emote, down: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        if !self.is_on() {
+            return;
+        }
+        if inner.emote_keys.press(emote, down) {
+            self.sink.send_emote(emote);
+        }
     }
 
     /// Reenvia o input atual para não expirar na sim enquanto uma tecla está segurada.
@@ -120,6 +137,7 @@ mod tests {
     enum Call {
         Input(i8, i8, bool),
         Autonomous(bool),
+        Emote(Emote),
     }
 
     #[derive(Default)]
@@ -134,6 +152,9 @@ mod tests {
         }
         fn set_autonomous(&self, on: bool) {
             self.0.lock().unwrap().push(Call::Autonomous(on));
+        }
+        fn send_emote(&self, emote: Emote) {
+            self.0.lock().unwrap().push(Call::Emote(emote));
         }
     }
 
@@ -166,15 +187,45 @@ mod tests {
     }
 
     #[test]
-    fn emote_keys_are_ignored_for_now() {
+    fn emote_key_down_sends_one_emote_when_on() {
         let (sink, mode) = setup();
         mode.toggle();
         sink.0.lock().unwrap().clear();
+        let wow = Key::Emote(Emote::Wow);
+        mode.on_key(wow, true);
+        assert_eq!(*sink.0.lock().unwrap(), vec![Call::Emote(Emote::Wow)]);
+        // Autorepeat e key-up não mandam nada; o emote não conta como tecla de movimento.
+        mode.on_key(wow, true);
+        mode.on_key(wow, false);
+        mode.keep_alive();
+        assert_eq!(*sink.0.lock().unwrap(), vec![Call::Emote(Emote::Wow)]);
+        // Solta e aperta de novo: outro emote (quem limita é o Host).
+        mode.on_key(wow, true);
+        assert_eq!(sink.0.lock().unwrap().len(), 2);
+        assert!(mode.is_on());
+    }
+
+    #[test]
+    fn emote_keys_ignored_when_off() {
+        let (sink, mode) = setup();
         mode.on_key(Key::Emote(Emote::Wow), true);
         mode.on_key(Key::Emote(Emote::Wow), false);
-        mode.keep_alive();
         assert!(sink.0.lock().unwrap().is_empty());
-        assert!(mode.is_on());
+
+        // Desligado com a tecla segurada: o key-up se perde, e religar começa do zero.
+        mode.toggle();
+        mode.on_key(Key::Emote(Emote::Heart), true);
+        mode.on_key(Key::Esc, true);
+        mode.on_key(Key::Emote(Emote::Heart), true);
+        mode.on_key(Key::Emote(Emote::Heart), false);
+        sink.0.lock().unwrap().clear();
+        mode.toggle();
+        mode.on_key(Key::Emote(Emote::Heart), true);
+        let calls = sink.0.lock().unwrap();
+        assert_eq!(
+            *calls,
+            vec![Call::Autonomous(false), Call::Emote(Emote::Heart)]
+        );
     }
 
     #[test]
@@ -212,5 +263,6 @@ mod tests {
             self.0.lock().unwrap().push((f.seq, f.move_x));
         }
         fn set_autonomous(&self, _: bool) {}
+        fn send_emote(&self, _: Emote) {}
     }
 }

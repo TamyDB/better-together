@@ -11,7 +11,7 @@ use dm_sim::World;
 
 use super::interp::{Interpolator, INTERP_DELAY_TICKS};
 use super::net::{NetIn, Out, PeerId};
-use crate::input::keys::{Key, KeyState};
+use crate::input::keys::{EmoteKeys, Key, KeyState};
 
 /// O convidado só conversa com o Host, sempre neste peer.
 pub const HOST_PEER: PeerId = 0;
@@ -91,6 +91,7 @@ impl Playing {
 pub struct GuestClient {
     rejoin_token: u64,
     keys: KeyState,
+    emote_keys: EmoteKeys,
     playing: Option<Playing>,
     /// Depois de `HostLost` o cliente fica encerrado; reconectar usa um novo cliente com o
     /// mesmo `rejoin_token`.
@@ -106,6 +107,7 @@ impl GuestClient {
         GuestClient {
             rejoin_token,
             keys: KeyState::default(),
+            emote_keys: EmoteKeys::default(),
             playing: None,
             lost: false,
             silence_lost: false,
@@ -149,13 +151,15 @@ impl GuestClient {
         }
     }
 
-    /// Teclas de movimento entram no input do próximo `tick`. Key-down de emote (autorepeat
-    /// incluso) enfileira um `GuestMsg::Emote` para `take_outgoing`; key-up de emote não faz
-    /// nada. Antes do `Welcome` ou depois de `HostLost`, emotes são descartados.
+    /// Teclas de movimento entram no input do próximo `tick`. Key-down de emote enfileira um
+    /// `GuestMsg::Emote` para `take_outgoing`, só na borda (o autorepeat não reenvia; ver
+    /// `EmoteKeys`); key-up de emote só solta a tecla. Antes do `Welcome` ou depois de
+    /// `HostLost`, emotes são descartados.
     pub fn set_key(&mut self, key: Key, down: bool) {
         match key {
             Key::Emote(emote) => {
-                if down && self.playing.is_some() && self.outgoing.len() < MAX_OUTGOING {
+                let fresh = self.emote_keys.press(emote, down);
+                if fresh && self.playing.is_some() && self.outgoing.len() < MAX_OUTGOING {
                     self.outgoing.push(to_host(&GuestMsg::Emote(emote)));
                 }
             }
@@ -171,7 +175,6 @@ impl GuestClient {
 
     /// Mensagem de chat para o Host, já limpa. Só depois do `Welcome`; texto vazio depois de
     /// limpo → `None`. Sem limite local: o Host decide, e a mensagem só aparece no eco dele.
-    #[cfg_attr(not(test), expect(dead_code, reason = "os comandos da Task 4 chamam"))]
     pub fn chat(&mut self, text: &str) -> Option<Out> {
         self.playing.as_ref()?;
         let text = sanitize_chat(text)?;
@@ -868,15 +871,23 @@ mod tests {
         // Key-up não manda nada.
         g.set_key(emote, false);
         assert!(g.take_outgoing().is_empty());
-        // Autorepeat: um por key-down; quem limita é o Host.
+        // Só na borda: o autorepeat (key-downs sem key-up) não reenvia.
         for _ in 0..3 {
             g.set_key(emote, true);
         }
         let outs = g.take_outgoing();
-        assert_eq!(outs.len(), 3);
-        assert!(outs
-            .iter()
-            .all(|o| sent_event(o) == GuestMsg::Emote(Emote::Laugh)));
+        assert_eq!(outs.len(), 1);
+        assert_eq!(sent_event(&outs[0]), GuestMsg::Emote(Emote::Laugh));
+        // Segurando o `2`, o `3` é outra tecla e sai.
+        g.set_key(Key::Emote(Emote::Wow), true);
+        g.set_key(emote, true);
+        let outs = g.take_outgoing();
+        assert_eq!(outs.len(), 1);
+        assert_eq!(sent_event(&outs[0]), GuestMsg::Emote(Emote::Wow));
+        // Solta e aperta de novo: outro emote; quem limita é o Host.
+        g.set_key(emote, false);
+        g.set_key(emote, true);
+        assert_eq!(g.take_outgoing().len(), 1);
         // O emote não mexe no pet: o input do tick continua parado.
         let (out, _) = g.tick();
         let f = sent_input(&out.unwrap());
@@ -889,6 +900,7 @@ mod tests {
         let mut g = welcomed(0.5, 0.5, 0);
         for _ in 0..1000 {
             g.set_key(Key::Emote(Emote::Wow), true);
+            g.set_key(Key::Emote(Emote::Wow), false);
         }
         assert_eq!(g.take_outgoing().len(), MAX_OUTGOING);
         g.set_key(Key::Emote(Emote::Wow), true);
@@ -906,6 +918,7 @@ mod tests {
         // O Host caiu antes do loop drenar: o emote pendente não sai mais.
         g.handle(NetIn::PeerClosed(HOST_PEER));
         assert!(g.take_outgoing().is_empty());
+        g.set_key(Key::Emote(Emote::Heart), false);
         g.set_key(Key::Emote(Emote::Heart), true);
         assert!(g.take_outgoing().is_empty());
     }

@@ -85,6 +85,37 @@ impl KeyState {
     }
 }
 
+/// Teclas de emote seguradas. O emote sai só no key-down que vem depois de um key-up da
+/// mesma tecla: o autorepeat de quem segura não reenvia.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EmoteKeys(u8);
+
+impl EmoteKeys {
+    /// Registra a tecla e diz se é um key-down novo (a tecla estava solta).
+    pub fn press(&mut self, emote: Emote, down: bool) -> bool {
+        let bit = 1u8 << emote_index(emote);
+        let fresh = down && self.0 & bit == 0;
+        if down {
+            self.0 |= bit;
+        } else {
+            self.0 &= !bit;
+        }
+        fresh
+    }
+}
+
+/// Posição em `Emote::ALL` (0..6).
+fn emote_index(emote: Emote) -> u8 {
+    match emote {
+        Emote::Heart => 0,
+        Emote::Laugh => 1,
+        Emote::Wow => 2,
+        Emote::Angry => 3,
+        Emote::Music => 4,
+        Emote::Question => 5,
+    }
+}
+
 /// O que o hook faz com um evento de tecla.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -95,14 +126,15 @@ pub struct HookDecision {
     pub forward: bool,
 }
 
-fn swallow_bit(key: Key) -> u8 {
+fn swallow_bit(key: Key) -> u16 {
     match key {
         Key::W => 1,
         Key::A => 1 << 1,
         Key::S => 1 << 2,
         Key::D => 1 << 3,
         Key::Esc => 1 << 4,
-        Key::Shift | Key::Emote(_) => 0,
+        Key::Emote(emote) => 1 << (5 + emote_index(emote)),
+        Key::Shift => 0,
     }
 }
 
@@ -113,16 +145,16 @@ fn swallow_bit(key: Key) -> u8 {
 ///   tecla "presa".
 /// - Shift nunca é engolido (para não quebrar Ctrl+Shift+P e Shift+Alt+Tab); o pet só o lê.
 /// - Key-ups sempre vão ao `PetMode`, para o movimento não ficar preso.
-/// - Teclas de emote passam direto, sem ir ao `PetMode`, até o modo bichinho tratá-las.
+/// - Os dígitos `1`–`6` (emotes) seguem as mesmas regras de WASD.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn filter_key(
-    swallowed: u8,
+    swallowed: u16,
     pet_mode: bool,
     key: Option<Key>,
     down: bool,
     modifier_down: bool,
-) -> (u8, HookDecision) {
-    let Some(key) = key.filter(|k| !matches!(k, Key::Emote(_))) else {
+) -> (u16, HookDecision) {
+    let Some(key) = key else {
         return (
             swallowed,
             HookDecision {
@@ -215,6 +247,7 @@ mod tests {
         for (i, emote) in Emote::ALL.into_iter().enumerate() {
             assert_eq!(Key::from_code(codes[i]), Some(Key::Emote(emote)));
             assert_eq!(Key::from_vk(0x31 + i as u16), Some(Key::Emote(emote)));
+            assert_eq!(usize::from(emote_index(emote)), i);
         }
         assert_eq!(Key::from_code("Digit1"), Some(Key::Emote(Emote::Heart)));
         assert_eq!(Key::from_code("Digit6"), Some(Key::Emote(Emote::Question)));
@@ -238,17 +271,73 @@ mod tests {
     }
 
     #[test]
-    fn hook_leaves_emote_keys_alone_for_now() {
-        // Até o modo bichinho tratar emotes, os dígitos seguem como antes: nem engolidos nem
-        // repassados.
-        for down in [true, false] {
-            let (s, d) = on(0b1_0101, Key::Emote(Emote::Wow), down, false);
-            assert_eq!(s, 0b1_0101);
-            assert!(!d.swallow && !d.forward);
+    fn emote_keys_fire_on_edge_only() {
+        let mut held = EmoteKeys::default();
+        assert!(held.press(Emote::Wow, true));
+        // Autorepeat: a tecla segue segurada, nada novo.
+        assert!(!held.press(Emote::Wow, true));
+        // Outra tecla é independente.
+        assert!(held.press(Emote::Heart, true));
+        assert!(!held.press(Emote::Wow, false));
+        assert!(held.press(Emote::Wow, true));
+        assert!(!held.press(Emote::Heart, true));
+        // Key-up sem key-down antes não faz nada de errado.
+        assert!(!held.press(Emote::Question, false));
+        for emote in Emote::ALL {
+            let mut held = EmoteKeys::default();
+            assert!(held.press(emote, true), "{emote:?}");
+            assert!(!held.press(emote, true), "{emote:?}");
         }
     }
 
-    fn on(state: u8, key: Key, down: bool, modifier: bool) -> (u8, HookDecision) {
+    #[test]
+    fn swallow_bits_are_distinct() {
+        let keys = [Key::W, Key::A, Key::S, Key::D, Key::Esc]
+            .into_iter()
+            .chain(Emote::ALL.into_iter().map(Key::Emote));
+        let mut all = 0u16;
+        for key in keys {
+            let bit = swallow_bit(key);
+            assert_eq!(bit.count_ones(), 1, "{key:?}");
+            assert_eq!(all & bit, 0, "{key:?}");
+            all |= bit;
+        }
+        assert_eq!(swallow_bit(Key::Shift), 0);
+    }
+
+    #[test]
+    fn hook_swallows_emote_keys_in_pet_mode() {
+        for emote in Emote::ALL {
+            let key = Key::Emote(emote);
+            // Modo ligado, sem modificador: engolida e repassada, como WASD.
+            let (s, d) = on(0b1_0101, key, true, false);
+            assert!(d.swallow && d.forward, "{emote:?}");
+            assert_eq!(s, 0b1_0101 | swallow_bit(key));
+            let (s, d) = on(s, key, false, false);
+            assert!(d.swallow && d.forward, "{emote:?}");
+            assert_eq!(s, 0b1_0101);
+        }
+        let key = Key::Emote(Emote::Wow);
+        // Com Ctrl/Alt/Win o dígito vai para o sistema; o key-up também.
+        let (s, d) = on(0, key, true, true);
+        assert!(!d.swallow && !d.forward);
+        let (s, d) = on(s, key, false, false);
+        assert!(!d.swallow && d.forward);
+        assert_eq!(s, 0);
+        // Modo desligado: o dígito é do sistema.
+        let (s, d) = filter_key(0, false, Some(key), true, false);
+        assert!(!d.swallow && !d.forward);
+        let (s, d) = filter_key(s, false, Some(key), false, false);
+        assert!(!d.swallow && d.forward);
+        assert_eq!(s, 0);
+        // Modo desligado no meio: o key-up do dígito engolido ainda é engolido.
+        let (s, _) = on(0, key, true, false);
+        let (s, d) = filter_key(s, false, Some(key), false, false);
+        assert!(d.swallow);
+        assert_eq!(s, 0);
+    }
+
+    fn on(state: u16, key: Key, down: bool, modifier: bool) -> (u16, HookDecision) {
         filter_key(state, true, Some(key), down, modifier)
     }
 

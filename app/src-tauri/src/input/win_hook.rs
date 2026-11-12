@@ -1,7 +1,7 @@
-//! Hook de teclado low-level do Windows: lê WASD/Shift/Esc no modo bichinho
-//! sem que essas teclas cheguem aos apps do Host.
+//! Hook de teclado low-level do Windows: lê WASD/Shift/Esc e os emotes `1`–`6` no modo
+//! bichinho sem que essas teclas cheguem aos apps do Host.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 
@@ -21,7 +21,7 @@ use crate::pet_mode::PetMode;
 // O callback do hook é `extern "system"` e não recebe contexto; o estado vive aqui.
 static MODE: OnceLock<Arc<PetMode>> = OnceLock::new();
 // Teclas cujo key-down foi engolido (ver `filter_key`). Só a thread do hook escreve.
-static SWALLOWED: AtomicU8 = AtomicU8::new(0);
+static SWALLOWED: AtomicU16 = AtomicU16::new(0);
 
 /// Instala o hook numa thread dedicada com o loop de mensagens que ele exige.
 pub fn install_keyboard_hook(mode: Arc<PetMode>) {

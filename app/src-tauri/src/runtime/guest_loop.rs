@@ -16,8 +16,13 @@ use crate::session::net::NetIn;
 
 pub enum GuestCommand {
     Key(Key, bool),
-    Choose { name: String, animal: Animal },
+    Choose {
+        name: String,
+        animal: Animal,
+    },
     Net(NetIn),
+    /// Chat do convidado; o texto é limpo pelo cliente e de novo pelo Host.
+    Chat(String),
 }
 
 /// Ponta de envio para a thread do convidado. Soltá-la fecha o canal e encerra a thread.
@@ -54,6 +59,11 @@ impl<E: FnMut(UiEvent)> GuestLoop<E> {
             GuestCommand::Key(key, down) => {
                 self.client.set_key(key, down);
                 for out in self.client.take_outgoing() {
+                    (self.emit)(out_event(out));
+                }
+            }
+            GuestCommand::Chat(text) => {
+                if let Some(out) = self.client.chat(&text) {
                     (self.emit)(out_event(out));
                 }
             }
@@ -262,6 +272,32 @@ mod tests {
         assert_eq!(
             decode::<GuestMsg>(&bytes).unwrap(),
             GuestMsg::Emote(Emote::Angry)
+        );
+    }
+
+    #[test]
+    fn chat_goes_to_host_on_events() {
+        let (handle, mut body, events) = guest_loop();
+        // Antes do `Welcome`: nada sai.
+        handle.send(GuestCommand::Chat("oi".into()));
+        assert!(body.drain(Instant::now()));
+        assert!(events.borrow().is_empty());
+
+        handle.send(from_host(&welcome()));
+        assert!(body.drain(Instant::now()));
+        events.borrow_mut().clear();
+        handle.send(GuestCommand::Chat("   ".into()));
+        handle.send(GuestCommand::Chat(" oi\n".into()));
+        assert!(body.drain(Instant::now()));
+        let events = events.borrow();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "net://send");
+        assert_eq!(events[0].1["peer"], json!(0));
+        assert_eq!(events[0].1["channel"], json!("events"));
+        let bytes: Vec<u8> = serde_json::from_value(events[0].1["bytes"].clone()).unwrap();
+        assert_eq!(
+            decode::<GuestMsg>(&bytes).unwrap(),
+            GuestMsg::Chat { text: "oi".into() }
         );
     }
 

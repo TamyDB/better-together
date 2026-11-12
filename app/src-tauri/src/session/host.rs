@@ -158,13 +158,11 @@ impl HostSession {
     }
 
     /// Chat do próprio Host: mesmas regras e limites de um convidado.
-    #[cfg_attr(not(test), expect(dead_code, reason = "os comandos da Task 4 chamam"))]
     pub fn host_chat(&mut self, text: &str, now: Instant) -> Vec<Out> {
         self.chat_from(HOST_PLAYER, text, now)
     }
 
     /// Emote do próprio Host: mesmas regras e limites de um convidado.
-    #[cfg_attr(not(test), expect(dead_code, reason = "os comandos da Task 4 chamam"))]
     pub fn host_emote(&mut self, emote: Emote, now: Instant) -> Vec<Out> {
         self.emote_from(HOST_PLAYER, emote, now)
     }

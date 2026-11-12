@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
-use dm_protocol::{InputFrame, RosterEntry};
+use dm_protocol::{Emote, InputFrame, RosterEntry};
 use tauri::AppHandle;
 
 use super::backlog::{RecvBacklog, MAX_COMMANDS_PER_PASS};
@@ -18,12 +18,17 @@ use crate::session::net::{NetIn, Out};
 pub trait SimSink: Send + Sync {
     fn send_input(&self, frame: InputFrame);
     fn set_autonomous(&self, on: bool);
+    /// Emote do pet do Host (tecla do modo bichinho ou botão da UI).
+    fn send_emote(&self, emote: Emote);
 }
 
 pub enum HostCommand {
     HostInput(InputFrame),
     HostAutonomous(bool),
     Net(NetIn),
+    /// Chat do próprio Host; o texto é limpo pela sessão.
+    Chat(String),
+    Emote(Emote),
 }
 
 /// Ponta de envio para a thread do Host. Soltar a última referência fecha o canal e
@@ -66,6 +71,11 @@ impl HostHandle {
         }
         let _ = self.tx.send(HostCommand::Net(ev));
     }
+
+    /// Chat do Host: a sessão limpa o texto e aplica o mesmo limite de um convidado.
+    pub fn chat(&self, text: String) {
+        let _ = self.tx.send(HostCommand::Chat(text));
+    }
 }
 
 impl SimSink for HostHandle {
@@ -75,6 +85,10 @@ impl SimSink for HostHandle {
 
     fn set_autonomous(&self, on: bool) {
         let _ = self.tx.send(HostCommand::HostAutonomous(on));
+    }
+
+    fn send_emote(&self, emote: Emote) {
+        let _ = self.tx.send(HostCommand::Emote(emote));
     }
 }
 
@@ -96,6 +110,14 @@ impl<E: FnMut(UiEvent)> HostLoop<E> {
                     self.backlog.release();
                 }
                 let outs = self.session.handle(ev, now);
+                self.emit_outs(outs);
+            }
+            HostCommand::Chat(text) => {
+                let outs = self.session.host_chat(&text, now);
+                self.emit_outs(outs);
+            }
+            HostCommand::Emote(emote) => {
+                let outs = self.session.host_emote(emote, now);
                 self.emit_outs(outs);
             }
         }
@@ -161,7 +183,9 @@ pub fn spawn_host_loop(app: AppHandle, session: HostSession) -> HostHandle {
 mod tests {
     use super::*;
     use crate::runtime::backlog::MAX_QUEUED_RECV;
-    use dm_protocol::{encode, Animal, Channel, GuestMsg, PROTOCOL_VERSION};
+    use dm_protocol::{
+        decode, encode, Animal, Channel, Emote, GuestMsg, HostMsg, PlayerId, PROTOCOL_VERSION,
+    };
     use serde_json::{json, Value};
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -231,6 +255,68 @@ mod tests {
             .map(|(_, p)| p)
             .collect();
         assert_eq!(video, vec![&json!({ "peer": 7, "on": true })]);
+    }
+
+    fn sent_to(events: &Events) -> Vec<(Value, HostMsg)> {
+        events
+            .borrow()
+            .iter()
+            .filter(|(n, _)| *n == "net://send")
+            .map(|(_, p)| {
+                let bytes: Vec<u8> = serde_json::from_value(p["bytes"].clone()).unwrap();
+                (p["peer"].clone(), decode::<HostMsg>(&bytes).unwrap())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn host_chat_reaches_admitted_peers_and_ui() {
+        let (handle, mut body, events) = host_loop();
+        handle.net(NetIn::PeerOpened(7));
+        handle.net(hello_recv(7));
+        // Peer 8 ainda no lobby: não recebe chat.
+        handle.net(NetIn::PeerOpened(8));
+        let now = Instant::now();
+        assert!(body.drain(now));
+        events.borrow_mut().clear();
+
+        handle.chat("  oi ".into());
+        assert!(body.drain(now));
+        let chat = HostMsg::Chat {
+            from: PlayerId(0),
+            text: "oi".into(),
+        };
+        assert_eq!(sent_to(&events), vec![(json!(7), chat)]);
+        let events = events.borrow();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].1["channel"], json!("events"));
+        assert_eq!(
+            events[1],
+            ("session://chat", json!({ "from": 0, "text": "oi" }))
+        );
+    }
+
+    #[test]
+    fn host_emote_reaches_admitted_peers_and_ui_with_cooldown() {
+        let (handle, mut body, events) = host_loop();
+        handle.net(NetIn::PeerOpened(7));
+        handle.net(hello_recv(7));
+        let now = Instant::now();
+        assert!(body.drain(now));
+        events.borrow_mut().clear();
+
+        // O botão e a tecla do modo bichinho caem no mesmo `host_emote`.
+        handle.send_emote(Emote::Heart);
+        handle.send_emote(Emote::Wow);
+        assert!(body.drain(now));
+        let emote = HostMsg::Emote {
+            from: PlayerId(0),
+            emote: Emote::Heart,
+        };
+        assert_eq!(sent_to(&events), vec![(json!(7), emote)]);
+        let names = names(&events);
+        assert_eq!(names, vec!["net://send", "session://emote"]);
+        assert_eq!(events.borrow()[1].1, json!({ "from": 0, "emote": "heart" }));
     }
 
     #[test]
