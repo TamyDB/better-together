@@ -13,7 +13,7 @@ dividem a área de trabalho do Host, bagunçam janelas, mandam emotes e conversa
 ![Plataforma](https://img.shields.io/badge/plataforma-Windows%2010%2B-0078D4)
 ![Rust](https://img.shields.io/badge/Rust-stable-DEA584?logo=rust&logoColor=white)
 ![Tauri](https://img.shields.io/badge/Tauri-2-24C8D8?logo=tauri&logoColor=white)
-![Status](https://img.shields.io/badge/status-M2%20·%20rede-F2C230)
+![Status](https://img.shields.io/badge/status-M4%20·%20social-F2C230)
 
 [O jogo](#-o-jogo) · [Instalação](#-instalação) · [Detalhes técnicos](#-detalhes-técnicos) · [Roadmap](#-roadmap)
 
@@ -63,12 +63,11 @@ as travessuras acima, e todas têm limite de tempo e de quantidade. O Host pode:
 Os convidados nunca recebem títulos de janelas nem nomes de programas do Host.
 
 > [!NOTE]
-> **Estado atual: marco M2 (rede).** A implementação está pronta, mas ainda não foi
+> **Estado atual: marco M4 (social).** A implementação está pronta, mas ainda não foi
 > validada ponta a ponta em janelas reais (nem no Windows). Dá para criar uma sala, entrar
-> com o código, escolher o animal e ver os bichinhos de todos se mexendo. O vídeo da tela
-> do Host chega no M3: por enquanto o convidado vê um painel escuro com um aviso, com os
-> bichinhos por cima. Vídeo, chat e travessuras chegam nos próximos marcos (veja o
-> [Roadmap](#-roadmap)).
+> com o código, escolher o animal, ver a tela do Host ao vivo com os bichinhos por cima,
+> conversar por chat e mandar emotes. Travessuras e botão de pânico chegam nos próximos
+> marcos (veja o [Roadmap](#-roadmap)).
 
 ---
 
@@ -186,7 +185,8 @@ ponta a ponta exige o WebView2, então precisa de uma VM ou um PC com Windows, e
 3. Convidado: `.\target\debug\better-together.exe`, com o código da sala; depois escolha um
    animal livre no lobby.
 
-O roteiro completo de teste manual está em [`docs/e2e-m2.md`](docs/e2e-m2.md).
+Os roteiros de teste manual estão em [`docs/e2e-m3.md`](docs/e2e-m3.md) (rede e vídeo) e
+[`docs/e2e-m4.md`](docs/e2e-m4.md) (chat e emotes).
 
 Pela internet, o Host e os convidados precisam alcançar a sinalização, então ela tem que
 ser hospedada por alguém (uma VPS, ou uma porta liberada no roteador). O código da sala
@@ -204,6 +204,21 @@ será preciso um servidor TURN próprio.
 | <kbd>Shift</kbd> | correr |
 | <kbd>Esc</kbd> | sair do modo bichinho |
 | Ícone na bandeja | alternar o modo / sair do app |
+
+#### Conversar e emotes
+
+No viewer do convidado:
+
+| Tecla | Ação |
+|:---|:---|
+| <kbd>Enter</kbd> | abre o campo de chat; <kbd>Enter</kbd> de novo envia |
+| <kbd>Esc</kbd> | cancela a mensagem e devolve o controle ao bichinho |
+| <kbd>1</kbd> a <kbd>6</kbd> | emotes ❤️ 😂 😮 😠 🎵 ❓ (ou clique nos botões) |
+
+Enquanto o campo de chat está aberto, digitar não move o bichinho. O texto tem até 120
+caracteres, e há limite de mensagens por jogador (3 seguidas, depois 1 a cada 2 s; 1 emote por
+segundo). O Host conversa pelo painel e, com o modo bichinho ligado, manda emotes com
+<kbd>1</kbd> a <kbd>6</kbd>.
 
 Fora do modo bichinho, o teclado funciona normalmente e o bichinho vagueia sozinho.
 Atalhos com <kbd>Ctrl</kbd>, <kbd>Alt</kbd> ou <kbd>Win</kbd> sempre chegam ao Windows.
@@ -321,8 +336,8 @@ do app. `cargo fmt`, `tsc` e o Vitest rodam só no Ubuntu.
 |:---:|:---|:---:|
 | **M1** | Fundação: protocolo, simulação, overlay, modo bichinho | ✅ |
 | **M2** | Rede: salas, WebRTC, lobby com escolha de animal, 4 bichinhos | 🧪 implementado, E2E manual pendente |
-| **M3** | Vídeo: stream da tela do Host para os convidados | ⏳ |
-| **M4** | Social: chat e emotes | ⏳ |
+| **M3** | Vídeo: stream da tela do Host para os convidados | 🧪 implementado, E2E manual pendente |
+| **M4** | Social: chat e emotes | 🧪 implementado, E2E manual pendente |
 | **M5** | Travessuras, painel de permissões e botão de pânico | ⏳ |
 | **M6** | Distribuição: instalador, auto-update, servidor de salas | ⏳ |
 
