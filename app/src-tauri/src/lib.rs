@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use dm_protocol::Animal;
+use dm_protocol::{Animal, RosterEntry};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -83,18 +83,26 @@ fn host_start(
     let session = HostSession::new(info.aspect, rand::random(), &name, animal);
     let handle = Arc::new(spawn_host_loop(app.clone(), session));
     let pet_mode = state.bind_pet_sink(handle.clone());
+    // Antes de a overlay carregar: o `host_roster` dela já precisa achar o Host.
+    state.set_mode(Mode::Host { handle, pet_mode });
 
     state.install_host_services_once(|pet_mode| install_host_services(&app, pet_mode));
+    tray::set_tray_visible(&app, true);
     if let Err(e) = app.global_shortcut().register(pet_mode_shortcut()) {
         log::warn!("não foi possível registrar Ctrl+Shift+P ({e}); use o menu da bandeja");
     }
     overlay::resize_main(&app, overlay::PANEL_SIZE);
 
-    state.set_mode(Mode::Host { handle, pet_mode });
     Ok(HostStarted {
         aspect: info.aspect,
         overlay_in_video: !info.excluded,
     })
+}
+
+/// Roster atual para a overlay recém-criada (vazio fora do modo Host).
+#[tauri::command]
+fn host_roster(state: State<'_, AppState>) -> Vec<RosterEntry> {
+    state.host_roster()
 }
 
 #[tauri::command]
@@ -160,6 +168,7 @@ fn session_reset(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
             log::debug!("atalho do modo bichinho não removido: {e}");
         }
         overlay::close_overlay(&app);
+        tray::set_tray_visible(&app, false);
     }
     if ended != Ended::None {
         overlay::resize_main(&app, overlay::LAUNCHER_SIZE);
@@ -186,6 +195,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             net_config,
             host_start,
+            host_roster,
             guest_start,
             guest_choose,
             net_peer_opened,

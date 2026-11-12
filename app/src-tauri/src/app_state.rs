@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
 
-use dm_protocol::{Animal, Channel, InputFrame, MAX_MESSAGE_BYTES};
+use dm_protocol::{Animal, Channel, InputFrame, RosterEntry, MAX_MESSAGE_BYTES};
 
 use crate::input::keys::Key;
 use crate::pet_mode::PetMode;
@@ -229,6 +229,15 @@ impl AppState {
             }
             Mode::Launcher | Mode::Host { .. } => Err("não há sessão de convidado".to_string()),
         }
+    }
+
+    /// Último roster do Host; vazio fora do modo Host. O lock de `Mode` não cobre a cópia.
+    pub fn host_roster(&self) -> Vec<RosterEntry> {
+        let handle = match &*lock(&self.mode) {
+            Mode::Host { handle, .. } => handle.clone(),
+            _ => return Vec::new(),
+        };
+        handle.roster()
     }
 
     /// Repassa um evento de rede ao loop do modo atual. Depois de um `session_reset` ainda
