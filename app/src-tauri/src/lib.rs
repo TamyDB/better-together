@@ -1,4 +1,5 @@
 mod app_state;
+mod capture;
 mod input;
 mod net_config;
 mod overlay;
@@ -11,11 +12,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use dm_protocol::Animal;
+use dm_protocol::{Animal, RosterEntry};
+use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-use app_state::{parse_recv, AppState, Ended, Mode};
+use app_state::{parse_recv, AppState, Ended, LastJoin, Mode};
 use input::keys::Key;
 use net_config::NetConfig;
 use pet_mode::{PetMode, KEEP_ALIVE_MS};
@@ -53,6 +55,15 @@ fn net_config() -> Result<NetConfig, String> {
     Ok(NetConfig::from_env())
 }
 
+/// Resposta do `host_start` para a UI.
+#[derive(Serialize)]
+struct HostStarted {
+    /// Proporção (largura/altura) da área da overlay.
+    aspect: f32,
+    /// A overlay não saiu da captura: os bichinhos do Host vão aparecer duplicados no vídeo.
+    overlay_in_video: bool,
+}
+
 // `async`: criar janela em comando síncrono trava no Windows (ver docs do WebviewWindowBuilder).
 #[tauri::command(async)]
 fn host_start(
@@ -60,33 +71,59 @@ fn host_start(
     state: State<'_, AppState>,
     name: String,
     animal: Animal,
-) -> Result<(), String> {
+) -> Result<HostStarted, String> {
     let _starting = state.begin_start("host")?;
 
     overlay::wait_overlay_gone(&app);
-    let aspect = overlay::setup_overlay(&app, overlay::dev_window_enabled()).map_err(|e| {
+    let info = overlay::setup_overlay(&app, overlay::dev_window_enabled()).map_err(|e| {
         overlay::close_overlay(&app);
         format!("falha ao criar a overlay: {e}")
     })?;
 
-    let session = HostSession::new(aspect, rand::random(), &name, animal);
+    let session = HostSession::new(info.aspect, rand::random(), &name, animal);
     let handle = Arc::new(spawn_host_loop(app.clone(), session));
     let pet_mode = state.bind_pet_sink(handle.clone());
+    // Antes de a overlay carregar: o `host_roster` dela já precisa achar o Host.
+    state.set_mode(Mode::Host { handle, pet_mode });
 
     state.install_host_services_once(|pet_mode| install_host_services(&app, pet_mode));
+    tray::set_tray_visible(&app, true);
     if let Err(e) = app.global_shortcut().register(pet_mode_shortcut()) {
         log::warn!("não foi possível registrar Ctrl+Shift+P ({e}); use o menu da bandeja");
     }
     overlay::resize_main(&app, overlay::PANEL_SIZE);
 
-    state.set_mode(Mode::Host { handle, pet_mode });
-    Ok(())
+    Ok(HostStarted {
+        aspect: info.aspect,
+        overlay_in_video: !info.excluded,
+    })
+}
+
+/// Roster atual para a overlay recém-criada (vazio fora do modo Host).
+#[tauri::command]
+fn host_roster(state: State<'_, AppState>) -> Vec<RosterEntry> {
+    state.host_roster()
 }
 
 #[tauri::command]
 fn guest_start(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let token = state.rejoin_token();
     state.enter_guest(|| spawn_guest_loop(app, GuestClient::new(token)))
+}
+
+#[tauri::command]
+fn remember_join(
+    state: State<'_, AppState>,
+    code: String,
+    name: String,
+    animal: Animal,
+) -> Result<(), String> {
+    state.remember_join(code, &name, animal)
+}
+
+#[tauri::command]
+fn last_join(state: State<'_, AppState>) -> Option<LastJoin> {
+    state.last_join()
 }
 
 #[tauri::command]
@@ -146,6 +183,7 @@ fn session_reset(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
             log::debug!("atalho do modo bichinho não removido: {e}");
         }
         overlay::close_overlay(&app);
+        tray::set_tray_visible(&app, false);
     }
     if ended != Ended::None {
         overlay::resize_main(&app, overlay::LAUNCHER_SIZE);
@@ -172,8 +210,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             net_config,
             host_start,
+            host_roster,
             guest_start,
             guest_choose,
+            remember_join,
+            last_join,
             net_peer_opened,
             net_peer_closed,
             net_recv,
@@ -196,4 +237,22 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("falha ao iniciar o app");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_started_json() {
+        let json = serde_json::to_value(HostStarted {
+            aspect: 1.5,
+            overlay_in_video: true,
+        })
+        .expect("serializa");
+        assert_eq!(
+            json,
+            serde_json::json!({"aspect": 1.5, "overlay_in_video": true})
+        );
+    }
 }

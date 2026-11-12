@@ -9,6 +9,7 @@ use crate::session::net::Out;
 
 pub const SNAPSHOT_EVENT: &str = "sim://snapshot";
 pub const NET_SEND_EVENT: &str = "net://send";
+pub const NET_VIDEO_EVENT: &str = "net://video";
 pub const ROSTER_EVENT: &str = "session://roster";
 pub const LOBBY_EVENT: &str = "session://lobby";
 pub const WELCOME_EVENT: &str = "session://welcome";
@@ -33,6 +34,7 @@ pub fn out_event(out: Out) -> UiEvent {
             json!({ "peer": peer, "channel": channel, "bytes": bytes }),
         ),
         Out::Roster(roster) => (ROSTER_EVENT, json!(roster)),
+        Out::Video { peer, on } => (NET_VIDEO_EVENT, json!({ "peer": peer, "on": on })),
     }
 }
 
@@ -84,6 +86,18 @@ mod tests {
                 "net://send",
                 json!({ "peer": 7, "channel": "events", "bytes": [1, 2, 255] })
             )
+        );
+    }
+
+    #[test]
+    fn net_video_payload() {
+        assert_eq!(
+            out_event(Out::Video { peer: 7, on: true }),
+            ("net://video", json!({ "peer": 7, "on": true }))
+        );
+        assert_eq!(
+            out_event(Out::Video { peer: 9, on: false }),
+            ("net://video", json!({ "peer": 9, "on": false }))
         );
     }
 

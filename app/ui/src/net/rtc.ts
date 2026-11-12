@@ -1,5 +1,7 @@
 import { CHANNELS, isChannelName, type ChannelName } from "./channels";
 import { IceQueue, once } from "./guards";
+import { acceptSdp, type Role } from "./sdp";
+import { VIDEO_ENCODING } from "./video";
 
 type Sig =
   | { kind: "sdp"; sdp: RTCSessionDescriptionInit }
@@ -31,7 +33,11 @@ function parseSig(data: unknown): Sig | null {
   return null;
 }
 
-/** Uma conexão WebRTC com um peer, com os 3 DataChannels negotiated. */
+/**
+ * Uma conexão WebRTC com um peer, com os 3 DataChannels negotiated.
+ * No Host há também um transceiver de vídeo `sendonly`, criado antes de qualquer oferta;
+ * trocar a track é `replaceTrack`, nunca renegociação.
+ */
 export class PeerLink {
   readonly opened: Promise<void>;
   private readonly channels = new Map<ChannelName, RTCDataChannel>();
@@ -39,6 +45,15 @@ export class PeerLink {
   private msgCb: (channel: ChannelName, bytes: Uint8Array) => void = () => {};
   private closeCbs: (() => void)[] = [];
   private closed = false;
+  // Host: sender do vídeo, a track pedida, a aplicada e a troca em andamento.
+  private readonly videoSender: RTCRtpSender | null = null;
+  private wantedVideo: MediaStreamTrack | null = null;
+  private appliedVideo: MediaStreamTrack | null = null;
+  private videoBusy = false;
+  private videoDone: Promise<void> = Promise.resolve();
+  // Convidado: última track de vídeo recebida e quem quer saber.
+  private lastVideo: MediaStreamTrack | null = null;
+  private videoCbs: ((track: MediaStreamTrack) => void)[] = [];
   private readonly fireClose = once(() => {
     if (this.closed) return;
     for (const cb of this.closeCbs) cb();
@@ -47,6 +62,7 @@ export class PeerLink {
   private constructor(
     private readonly pc: RTCPeerConnection,
     private readonly sendSignal: (data: unknown) => void,
+    private readonly role: Role,
   ) {
     this.ice = new IceQueue((c) => pc.addIceCandidate(c));
     let openCount = 0;
@@ -57,6 +73,20 @@ export class PeerLink {
       rejectOpen = rej;
     });
     this.opened.catch(() => {}); // evita rejeição não tratada se ninguém espera
+
+    if (role === "host") {
+      const tr = pc.addTransceiver("video", {
+        direction: "sendonly",
+        sendEncodings: [VIDEO_ENCODING],
+      });
+      this.videoSender = tr.sender;
+    } else {
+      pc.ontrack = (e) => {
+        if (this.closed || e.track.kind !== "video") return;
+        this.lastVideo = e.track;
+        for (const cb of this.videoCbs) cb(e.track);
+      };
+    }
 
     for (const name of Object.keys(CHANNELS) as ChannelName[]) {
       const ch = pc.createDataChannel(name, CHANNELS[name]);
@@ -85,8 +115,12 @@ export class PeerLink {
     };
   }
 
-  static create(iceServers: RTCIceServer[], sendSignal: (data: unknown) => void): PeerLink {
-    return new PeerLink(new RTCPeerConnection({ iceServers }), sendSignal);
+  static create(
+    iceServers: RTCIceServer[],
+    sendSignal: (data: unknown) => void,
+    role: Role,
+  ): PeerLink {
+    return new PeerLink(new RTCPeerConnection({ iceServers }), sendSignal, role);
   }
 
   async makeOffer(): Promise<void> {
@@ -104,6 +138,7 @@ export class PeerLink {
         await this.ice.add(sig.candidate);
         return;
       }
+      if (!acceptSdp(this.role, sig.sdp)) return; // papel errado, mídia indevida ou grande demais
       await this.pc.setRemoteDescription(sig.sdp);
       if (sig.sdp.type === "offer") {
         const answer = await this.pc.createAnswer();
@@ -136,10 +171,51 @@ export class PeerLink {
     this.closeCbs.push(cb);
   }
 
+  /**
+   * Host: troca a track enviada (`null` pausa). Nunca rejeita; no-op depois de `close()`.
+   * Trocas seguidas são serializadas e a última pedida vence.
+   */
+  setVideo(track: MediaStreamTrack | null): Promise<void> {
+    if (this.closed || !this.videoSender) return Promise.resolve();
+    this.wantedVideo = track;
+    // A flag é síncrona: uma troca pedida depois do fim do laço sempre inicia outro.
+    if (!this.videoBusy) {
+      this.videoBusy = true;
+      this.videoDone = this.applyVideo(this.videoSender);
+    }
+    return this.videoDone;
+  }
+
+  private async applyVideo(sender: RTCRtpSender): Promise<void> {
+    try {
+      while (!this.closed && this.wantedVideo !== this.appliedVideo) {
+        const track = this.wantedVideo;
+        try {
+          await sender.replaceTrack(track);
+          this.appliedVideo = track;
+        } catch (e) {
+          console.debug("falha ao trocar a track de vídeo", e);
+          if (this.wantedVideo === track) break; // nada mais novo para tentar
+        }
+      }
+    } finally {
+      this.videoBusy = false;
+    }
+  }
+
+  /** Convidado: entrega a última track de vídeo já recebida, se houver, e as seguintes. */
+  onVideo(cb: (track: MediaStreamTrack) => void): void {
+    if (this.closed) return;
+    this.videoCbs.push(cb);
+    if (this.lastVideo) cb(this.lastVideo);
+  }
+
   /** Fecha sem disparar `onClose`: quem fecha já sabe. */
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.videoCbs = [];
+    this.lastVideo = null;
     for (const ch of this.channels.values()) ch.close();
     this.pc.close();
   }

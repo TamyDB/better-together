@@ -4,7 +4,9 @@ const h = vi.hoisted(() => ({
   invoke: vi.fn(async (..._a: unknown[]) => undefined as unknown),
   listeners: new Map<string, (e: { payload: unknown }) => void>(),
   startGuestNet: vi.fn(),
+  startHostNet: vi.fn(),
   stop: vi.fn(async () => {}),
+  setVideo: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: h.invoke }));
@@ -14,14 +16,13 @@ vi.mock("@tauri-apps/api/event", () => ({
     return () => {};
   }),
 }));
-vi.mock("../net/bridge", () => ({ startGuestNet: h.startGuestNet, startHostNet: vi.fn() }));
+vi.mock("../net/bridge", () => ({ startGuestNet: h.startGuestNet, startHostNet: h.startHostNet }));
 vi.mock("../render/canvas", () => ({
   startRenderer: () => ({ update() {}, setRoster() {}, stop() {} }),
 }));
 
+import { GUEST_PAUSED_TEXT, GUEST_WAITING_TEXT, STALL_MS } from "../net/video";
 import { startMainWindow } from "./main-window";
-
-const LAST_KEY = "bt.last";
 
 /** DOM mínimo: só o que `main-window` usa, para exercitar a fiação sem navegador. */
 class FakeEl {
@@ -33,6 +34,13 @@ class FakeEl {
   placeholder = "";
   maxLength = 0;
   disabled = false;
+  hidden = false;
+  srcObject: unknown = null;
+  muted = false;
+  autoplay = false;
+  playsInline = false;
+  attrs = new Map<string, string>();
+  listeners = new Map<string, Set<() => void>>();
   clientWidth = 0;
   clientHeight = 0;
   style = { cssText: "" };
@@ -52,10 +60,52 @@ class FakeEl {
     return null;
   }
   remove() {}
+  setAttribute(name: string, value: string) {
+    this.attrs.set(name, value);
+  }
+  addEventListener(name: string, cb: () => void) {
+    if (!this.listeners.has(name)) this.listeners.set(name, new Set());
+    this.listeners.get(name)!.add(cb);
+  }
+  removeEventListener(name: string, cb: () => void) {
+    this.listeners.get(name)?.delete(cb);
+  }
+  fire(name: string) {
+    for (const cb of this.listeners.get(name) ?? []) cb();
+  }
 }
 
+/** Track falsa de captura (Host) ou recebida (convidado). */
+function fakeTrack() {
+  const listeners = new Map<string, Set<() => void>>();
+  const t = {
+    contentHint: "",
+    onended: null as (() => void) | null,
+    stop: vi.fn(),
+    getSettings: (): MediaTrackSettings => ({ displaySurface: "monitor", width: 1280, height: 720 }),
+    addEventListener(name: string, cb: () => void) {
+      if (!listeners.has(name)) listeners.set(name, new Set());
+      listeners.get(name)!.add(cb);
+    },
+    removeEventListener(name: string, cb: () => void) {
+      listeners.get(name)?.delete(cb);
+    },
+    fire(name: string) {
+      for (const cb of listeners.get(name) ?? []) cb();
+    },
+    listenerCount: () => [...listeners.values()].reduce((n, s) => n + s.size, 0),
+  };
+  return t;
+}
+type FakeTrack = ReturnType<typeof fakeTrack>;
+const streamOf = (...tracks: FakeTrack[]) => ({
+  getVideoTracks: () => tracks,
+  getTracks: () => tracks,
+});
+
 let app: FakeEl;
-let storage: Map<string, string>;
+/** Lembrança que o `last_join` devolve; `remember_join` a atualiza, como o Rust. */
+let last: unknown = null;
 let reload: ReturnType<typeof vi.fn>;
 
 function walk(e: FakeEl): FakeEl[] {
@@ -69,7 +119,8 @@ const nameInput = () => walk(app).find((e) => e.placeholder === "Seu nome")!;
 const flush = () => vi.advanceTimersByTimeAsync(0);
 const emit = (name: string, payload: unknown = null) => h.listeners.get(name)!({ payload });
 const chooses = () => h.invoke.mock.calls.filter((c) => c[0] === "guest_choose").map((c) => c[1]);
-const stored = () => JSON.parse(storage.get(LAST_KEY) ?? "null");
+const remembers = () =>
+  h.invoke.mock.calls.filter((c) => c[0] === "remember_join").map((c) => c[1]);
 
 async function launch(): Promise<void> {
   startMainWindow();
@@ -88,14 +139,50 @@ async function enter(net: Promise<unknown> = Promise.resolve({ stop: h.stop }), 
   await flush();
 }
 
+/** Resposta do `host_start` nos testes. */
+let started: unknown = { aspect: 16 / 9, overlay_in_video: false };
+/** Ordem de `getDisplayMedia` e dos `invoke`s, para conferir o gesto do usuário. */
+let log: string[] = [];
+let getDisplayMedia: ReturnType<typeof vi.fn>;
+
 beforeEach(() => {
   vi.useFakeTimers();
+  // O seletor recusa por padrão: o `console.debug` da recusa só polui a saída.
+  vi.spyOn(console, "debug").mockImplementation(() => {});
   h.invoke.mockClear();
-  h.invoke.mockImplementation(async () => undefined);
+  last = null;
+  started = { aspect: 16 / 9, overlay_in_video: false };
+  log = [];
+  h.invoke.mockImplementation(async (cmd: unknown, args: unknown) => {
+    log.push(String(cmd));
+    if (cmd === "last_join") return last;
+    if (cmd === "remember_join") last = args;
+    if (cmd === "host_start") return started;
+    return undefined;
+  });
   h.listeners.clear();
   h.startGuestNet.mockReset();
+  h.startHostNet.mockReset();
+  h.startHostNet.mockImplementation(async (_cfg: unknown, onCode: (c: string) => void) => {
+    onCode("PATO-4821");
+    return { stop: h.stop, setVideo: h.setVideo };
+  });
   h.stop.mockClear();
-  storage = new Map();
+  h.setVideo.mockClear();
+  getDisplayMedia = vi.fn(async () => {
+    log.push("capture");
+    throw new DOMException("recusado", "NotAllowedError");
+  });
+  vi.stubGlobal("navigator", { mediaDevices: { getDisplayMedia }, clipboard: {} });
+  vi.stubGlobal(
+    "MediaStream",
+    class {
+      constructor(readonly tracks: unknown[]) {}
+      getTracks() {
+        return this.tracks;
+      }
+    },
+  );
   reload = vi.fn();
   const body = new FakeEl("body");
   vi.stubGlobal("document", {
@@ -110,15 +197,12 @@ beforeEach(() => {
   });
   vi.stubGlobal("window", { addEventListener() {}, removeEventListener() {} });
   vi.stubGlobal("location", { reload });
-  vi.stubGlobal("sessionStorage", {
-    getItem: (k: string) => storage.get(k) ?? null,
-    setItem: (k: string, v: string) => void storage.set(k, v),
-  });
 });
 
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("espera depois de conectar", () => {
@@ -185,53 +269,469 @@ describe("espera depois de conectar", () => {
   });
 });
 
-describe("bt.last", () => {
+describe("lembrança de reconexão", () => {
   const SAVED = { code: "PATO-4821", name: "Tamy", animal: "duck" };
 
   it("reconexão automática guarda o nome enviado, não o do campo vazio", async () => {
-    storage.set(LAST_KEY, JSON.stringify(SAVED));
+    last = SAVED;
     await enter();
     emit("session://lobby", { taken: [] });
+    await flush();
     expect(chooses()).toEqual([{ name: "Tamy", animal: "duck" }]);
     emit("session://welcome", { animal: "duck", aspect: 2 });
-    expect(stored()).toEqual(SAVED);
+    expect(remembers()).toEqual([SAVED]);
+  });
+
+  it("dois lobbies durante a leitura da lembrança escolhem uma vez só", async () => {
+    last = SAVED;
+    await enter();
+    emit("session://lobby", { taken: [] });
+    emit("session://lobby", { taken: ["horse"] });
+    await flush();
+    expect(chooses()).toEqual([{ name: "Tamy", animal: "duck" }]);
   });
 
   it("escolha manual guarda o nome do campo", async () => {
     await enter(undefined, "Ana");
     emit("session://lobby", { taken: [] });
+    await flush();
     byText("span", "Capivara")!;
     walk(app)
       .filter((e) => e.tag === "button" && e.className === "card")[1]
       .onclick?.();
     expect(chooses()).toEqual([{ name: "Ana", animal: "capybara" }]);
     emit("session://welcome", { animal: "capybara", aspect: 2 });
-    expect(stored()).toEqual({ code: "PATO-4821", name: "Ana", animal: "capybara" });
+    expect(remembers()).toEqual([{ code: "PATO-4821", name: "Ana", animal: "capybara" }]);
   });
 
   it("depois de a tentativa automática ser recusada, guarda o nome da escolha manual", async () => {
-    storage.set(LAST_KEY, JSON.stringify(SAVED));
+    last = SAVED;
     await enter(undefined, "Ana");
     emit("session://lobby", { taken: [] });
+    await flush();
     emit("session://rejected", { reason: "room_full" });
     walk(app)
       .filter((e) => e.tag === "button" && e.className === "card")[2]
       .onclick?.();
     emit("session://welcome", { animal: "horse", aspect: 2 });
-    expect(stored().name).toBe("Ana");
+    expect(remembers()).toEqual([{ code: "PATO-4821", name: "Ana", animal: "horse" }]);
   });
 
   it("pré-preenche o código da última sala e habilita Entrar", async () => {
-    storage.set(LAST_KEY, JSON.stringify(SAVED));
+    last = SAVED;
     await launch();
     expect(codeInput().value).toBe("PATO-4821");
     expect(byText("button", "Entrar")!.disabled).toBe(false);
   });
 
   it("sem lembrança válida o campo fica vazio", async () => {
-    storage.set(LAST_KEY, "{lixo");
+    last = "{lixo";
     await launch();
     expect(codeInput().value).toBe("");
     expect(byText("button", "Entrar")!.disabled).toBe(true);
+  });
+});
+
+describe("lobby com a lembrança ainda sendo lida", () => {
+  const SAVED = { code: "PATO-4821", name: "Tamy", animal: "duck" };
+
+  it("Cancelar durante a leitura não escolhe nada", async () => {
+    last = SAVED;
+    await enter();
+    emit("session://lobby", { taken: [] });
+    byText("button", "Cancelar")!.onclick?.();
+    await flush();
+    expect(chooses()).toEqual([]);
+  });
+
+  it("rejeição durante a leitura deixa o lobby manual", async () => {
+    last = SAVED;
+    await enter();
+    emit("session://lobby", { taken: [] });
+    emit("session://rejected", { reason: "room_full" });
+    await flush();
+    expect(chooses()).toEqual([]);
+    expect(title()).toBe("Escolha seu bichinho");
+  });
+});
+
+/** Escolhe o primeiro bichinho e clica em "Criar sala" (sem esperar nada). */
+async function clickCreate(): Promise<void> {
+  await launch();
+  walk(app)
+    .filter((e) => e.tag === "button" && e.className === "card")[0]
+    .onclick?.();
+  log = [];
+  byText("button", "Criar sala")!.onclick?.();
+}
+
+/** Captura que só resolve quando o teste mandar. */
+function pendingCapture() {
+  let resolve!: (s: unknown) => void;
+  getDisplayMedia.mockImplementation(() => new Promise((r) => (resolve = r)));
+  return (t: FakeTrack) => resolve(streamOf(t));
+}
+
+const videoStatus = () => walk(app).find((e) => e.className === "video-status");
+
+describe("compartilhamento de tela no Host", () => {
+  it("Criar sala abre o seletor antes do primeiro invoke", async () => {
+    await clickCreate();
+    expect(getDisplayMedia).toHaveBeenCalledTimes(1);
+    expect(log[0]).toBe("capture");
+    await flush();
+    expect(log.slice(0, 2)).toEqual(["capture", "host_start"]);
+  });
+
+  it("com o seletor recusado a sala abre e oferece Compartilhar tela", async () => {
+    await clickCreate();
+    await flush();
+    expect(byText("div", "PATO-4821")).toBeDefined();
+    expect(h.startHostNet.mock.calls[0][3]).toBeNull();
+    expect(byText("div", "Tela não compartilhada")).toBeDefined();
+    expect(byText("button", "Compartilhar tela")).toBeDefined();
+    expect(byText("button", "Pausar vídeo")).toBeUndefined();
+  });
+
+  it("sem navigator.mediaDevices a sala abre sem vídeo", async () => {
+    vi.stubGlobal("navigator", {});
+    await clickCreate();
+    await flush();
+    expect(byText("div", "PATO-4821")).toBeDefined();
+    expect(byText("button", "Compartilhar tela")).toBeDefined();
+  });
+
+  it("track escolhida antes da sala vai para o startHostNet", async () => {
+    const t = fakeTrack();
+    getDisplayMedia.mockResolvedValue(streamOf(t));
+    await clickCreate();
+    await flush();
+    expect(h.startHostNet.mock.calls[0][3]).toBe(t);
+    expect(t.contentHint).toBe("detail");
+    expect(byText("div", "Compartilhando a tela")).toBeDefined();
+    expect(byText("button", "Pausar vídeo")).toBeDefined();
+    expect(byText("button", "Trocar tela")).toBeDefined();
+  });
+
+  it("track escolhida depois da sala vai por setVideo", async () => {
+    const pick = pendingCapture();
+    await clickCreate();
+    await flush();
+    expect(h.startHostNet.mock.calls[0][3]).toBeNull();
+    const t = fakeTrack();
+    pick(t);
+    await flush();
+    expect(h.setVideo).toHaveBeenLastCalledWith(t);
+    expect(byText("button", "Trocar tela")).toBeDefined();
+  });
+
+  it("track escolhida durante a conexão vai por setVideo quando a sala abre", async () => {
+    const pick = pendingCapture();
+    let open!: () => void;
+    h.startHostNet.mockImplementation(
+      (_cfg: unknown, onCode: (c: string) => void) =>
+        new Promise((r) => {
+          open = () => {
+            onCode("PATO-4821");
+            r({ stop: h.stop, setVideo: h.setVideo });
+          };
+        }),
+    );
+    await clickCreate();
+    await flush();
+    expect(h.startHostNet).toHaveBeenCalledTimes(1);
+    expect(h.startHostNet.mock.calls[0][3]).toBeNull();
+    const t = fakeTrack();
+    pick(t);
+    await flush();
+    expect(h.setVideo).not.toHaveBeenCalled(); // ainda sem sessão
+    open();
+    await flush();
+    expect(h.setVideo).toHaveBeenCalledTimes(1);
+    expect(h.setVideo).toHaveBeenCalledWith(t);
+  });
+
+  it("Encerrar para a track antes do session.stop()", async () => {
+    const t = fakeTrack();
+    getDisplayMedia.mockResolvedValue(streamOf(t));
+    await clickCreate();
+    await flush();
+    byText("button", "Encerrar")!.onclick?.();
+    await flush();
+    expect(t.stop).toHaveBeenCalledTimes(1);
+    expect(h.stop).toHaveBeenCalledTimes(1);
+    expect(t.stop.mock.invocationCallOrder[0]).toBeLessThan(h.stop.mock.invocationCallOrder[0]);
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("Encerrar com o seletor ainda aberto para a track que chegar depois", async () => {
+    const pick = pendingCapture();
+    await clickCreate();
+    await flush();
+    byText("button", "Encerrar")!.onclick?.();
+    await flush();
+    const setVideoCalls = h.setVideo.mock.calls.length;
+    const t = fakeTrack();
+    pick(t);
+    await flush();
+    expect(t.stop).toHaveBeenCalledTimes(1);
+    expect(h.setVideo).toHaveBeenCalledTimes(setVideoCalls);
+  });
+
+  it("erro ao criar a sala para a track", async () => {
+    const t = fakeTrack();
+    getDisplayMedia.mockResolvedValue(streamOf(t));
+    h.startHostNet.mockRejectedValue(new Error("Conexão com o servidor perdida"));
+    await clickCreate();
+    await flush();
+    expect(title()).toBe("Não foi possível criar a sala");
+    expect(t.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("Pausar e Retomar trocam a track enviada", async () => {
+    const t = fakeTrack();
+    getDisplayMedia.mockResolvedValue(streamOf(t));
+    await clickCreate();
+    await flush();
+    byText("button", "Pausar vídeo")!.onclick?.();
+    expect(h.setVideo).toHaveBeenLastCalledWith(null);
+    expect(byText("div", "Vídeo pausado")).toBeDefined();
+    byText("button", "Retomar vídeo")!.onclick?.();
+    expect(h.setVideo).toHaveBeenLastCalledWith(t);
+    expect(t.stop).not.toHaveBeenCalled();
+  });
+
+  it("Trocar tela abre o seletor no clique e para a track antiga", async () => {
+    const a = fakeTrack();
+    getDisplayMedia.mockResolvedValue(streamOf(a));
+    await clickCreate();
+    await flush();
+    const b = fakeTrack();
+    getDisplayMedia.mockResolvedValue(streamOf(b));
+    byText("button", "Trocar tela")!.onclick?.();
+    expect(getDisplayMedia).toHaveBeenCalledTimes(2);
+    await flush();
+    expect(a.stop).toHaveBeenCalledTimes(1);
+    expect(h.setVideo).toHaveBeenLastCalledWith(b);
+  });
+
+  it("Parar de compartilhar no Chromium volta para Compartilhar tela", async () => {
+    const t = fakeTrack();
+    getDisplayMedia.mockResolvedValue(streamOf(t));
+    await clickCreate();
+    await flush();
+    t.onended?.();
+    expect(h.setVideo).toHaveBeenLastCalledWith(null);
+    expect(byText("div", "Compartilhamento encerrado")).toBeDefined();
+    expect(byText("button", "Compartilhar tela")).toBeDefined();
+  });
+
+  it("captura de uma janela mostra o aviso de desalinhamento", async () => {
+    const t = fakeTrack();
+    t.getSettings = () => ({ displaySurface: "window", width: 800, height: 600 });
+    getDisplayMedia.mockResolvedValue(streamOf(t));
+    await clickCreate();
+    await flush();
+    expect(
+      byText(
+        "div",
+        "Você está compartilhando uma janela: os bichinhos vão ficar desalinhados. Compartilhe a tela inteira.",
+      ),
+    ).toBeDefined();
+  });
+
+  it("overlay dentro do vídeo avisa o Host", async () => {
+    started = { aspect: 16 / 9, overlay_in_video: true };
+    await clickCreate();
+    await flush();
+    expect(
+      byText("div", "Seu Windows não esconde os bichinhos do vídeo: eles vão aparecer duplicados"),
+    ).toBeDefined();
+  });
+
+  it("overlay fora do vídeo não avisa", async () => {
+    await clickCreate();
+    await flush();
+    expect(
+      byText("div", "Seu Windows não esconde os bichinhos do vídeo: eles vão aparecer duplicados"),
+    ).toBeUndefined();
+  });
+});
+
+describe("vídeo no viewer do convidado", () => {
+  /** Entra guardando o `onVideo`; com `t`, a track chega antes de `startGuestNet` resolver. */
+  let deliver: (t: unknown) => void = () => {};
+  async function enterWithTrack(t?: FakeTrack): Promise<void> {
+    h.startGuestNet.mockImplementation(
+      async (_cfg: unknown, _code: string, onVideo: (t: unknown) => void) => {
+        deliver = onVideo;
+        if (t) onVideo(t);
+        return { stop: h.stop };
+      },
+    );
+    await launch();
+    const code = codeInput();
+    code.value = "PATO-4821";
+    code.oninput?.();
+    byText("button", "Entrar")!.onclick?.();
+    await flush();
+  }
+  const videoEl = () => walk(app).find((e) => e.tag === "video");
+  const srcTracks = () => (videoEl()!.srcObject as { getTracks(): unknown[] } | null)?.getTracks();
+
+  it("track entregue antes do welcome termina no srcObject do <video>", async () => {
+    const t = fakeTrack();
+    await enterWithTrack(t);
+    emit("session://welcome", { animal: "duck", aspect: 2 });
+    const v = videoEl()!;
+    expect(srcTracks()).toEqual([t]);
+    expect([v.muted, v.autoplay, v.playsInline]).toEqual([true, true, true]);
+  });
+
+  it("track que chega com o viewer aberto também é ligada", async () => {
+    await enterWithTrack();
+    emit("session://welcome", { animal: "duck", aspect: 2 });
+    expect(srcTracks()).toBeUndefined();
+    const t = fakeTrack();
+    deliver(t);
+    expect(srcTracks()).toEqual([t]);
+  });
+
+  it("aguardando até tocar, pausado no mute, some no unmute", async () => {
+    const t = fakeTrack();
+    await enterWithTrack(t);
+    emit("session://welcome", { animal: "duck", aspect: 2 });
+    expect(videoStatus()!.hidden).toBe(false);
+    expect(videoStatus()!.textContent).toBe(GUEST_WAITING_TEXT);
+    // Mute antes de tocar (a track nasce muda) não troca o texto.
+    t.fire("mute");
+    expect(videoStatus()!.textContent).toBe(GUEST_WAITING_TEXT);
+    videoEl()!.fire("playing");
+    expect(videoStatus()!.hidden).toBe(true);
+    t.fire("mute");
+    expect(videoStatus()!.hidden).toBe(false);
+    expect(videoStatus()!.textContent).toBe(GUEST_PAUSED_TEXT);
+    t.fire("unmute");
+    expect(videoStatus()!.hidden).toBe(true);
+    t.fire("mute");
+    videoEl()!.fire("playing");
+    expect(videoStatus()!.hidden).toBe(true);
+  });
+
+  it("novo welcome reusa a mesma track e solta a anterior", async () => {
+    const t = fakeTrack();
+    await enterWithTrack(t);
+    emit("session://welcome", { animal: "duck", aspect: 2 });
+    const first = videoEl()!;
+    emit("session://welcome", { animal: "duck", aspect: 2 });
+    expect(first.srcObject).toBeNull();
+    expect(videoEl()).not.toBe(first);
+    expect(srcTracks()).toEqual([t]);
+    expect(t.listenerCount()).toBe(2);
+  });
+
+  /** `requestVideoFrameCallback` falso: `frame()` entrega um quadro a quem pediu. */
+  function fakeFrames(v: FakeEl) {
+    const cbs = new Map<number, () => void>();
+    let next = 0;
+    Object.assign(v, {
+      requestVideoFrameCallback: (cb: () => void) => {
+        cbs.set(++next, cb);
+        return next;
+      },
+      cancelVideoFrameCallback: (id: number) => cbs.delete(id),
+    });
+    return {
+      frame() {
+        const due = [...cbs.values()];
+        cbs.clear();
+        for (const cb of due) cb();
+      },
+      pending: () => cbs.size,
+    };
+  }
+
+  it("quadros parados por STALL_MS mostram pausado; o próximo quadro esconde", async () => {
+    const t = fakeTrack();
+    await enterWithTrack(t);
+    emit("session://welcome", { animal: "duck", aspect: 2 });
+    const frames = fakeFrames(videoEl()!);
+    // Antes de tocar não há vigia: a espera é do "Aguardando".
+    await vi.advanceTimersByTimeAsync(STALL_MS * 2);
+    expect(videoStatus()!.textContent).toBe(GUEST_WAITING_TEXT);
+    videoEl()!.fire("playing");
+    expect(videoStatus()!.hidden).toBe(true);
+    await vi.advanceTimersByTimeAsync(STALL_MS - 1);
+    frames.frame();
+    await vi.advanceTimersByTimeAsync(STALL_MS - 1);
+    expect(videoStatus()!.hidden).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(videoStatus()!.hidden).toBe(false);
+    expect(videoStatus()!.textContent).toBe(GUEST_PAUSED_TEXT);
+    frames.frame();
+    expect(videoStatus()!.hidden).toBe(true);
+    // Parou de novo: avisa de novo.
+    await vi.advanceTimersByTimeAsync(STALL_MS);
+    expect(videoStatus()!.textContent).toBe(GUEST_PAUSED_TEXT);
+    expect(videoStatus()!.hidden).toBe(false);
+
+    // Com quadro chegando, há prazo armado e pedido de quadro pendente: o dispose cancela ambos.
+    frames.frame();
+    expect(vi.getTimerCount()).toBe(1);
+    expect(frames.pending()).toBe(1);
+    emit("session://host-lost");
+    expect(vi.getTimerCount()).toBe(0);
+    expect(frames.pending()).toBe(0);
+  });
+
+  it("sem requestVideoFrameCallback, conta os quadros a cada 500 ms", async () => {
+    const t = fakeTrack();
+    await enterWithTrack(t);
+    emit("session://welcome", { animal: "duck", aspect: 2 });
+    let total = 10;
+    Object.assign(videoEl()!, { getVideoPlaybackQuality: () => ({ totalVideoFrames: total }) });
+    videoEl()!.fire("playing");
+    await vi.advanceTimersByTimeAsync(STALL_MS);
+    expect(videoStatus()!.hidden).toBe(false);
+    expect(videoStatus()!.textContent).toBe(GUEST_PAUSED_TEXT);
+    total++;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(videoStatus()!.hidden).toBe(true);
+    emit("session://host-lost");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("sem como contar quadros, só o mute avisa", async () => {
+    const t = fakeTrack();
+    await enterWithTrack(t);
+    emit("session://welcome", { animal: "duck", aspect: 2 });
+    videoEl()!.fire("playing");
+    await vi.advanceTimersByTimeAsync(STALL_MS * 3);
+    expect(videoStatus()!.hidden).toBe(true);
+    t.fire("mute");
+    expect(videoStatus()!.textContent).toBe(GUEST_PAUSED_TEXT);
+  });
+
+  it("track nova volta a aguardar e desliga a vigia da anterior", async () => {
+    const t = fakeTrack();
+    await enterWithTrack(t);
+    emit("session://welcome", { animal: "duck", aspect: 2 });
+    const frames = fakeFrames(videoEl()!);
+    videoEl()!.fire("playing");
+    deliver(fakeTrack());
+    expect(frames.pending()).toBe(0);
+    await vi.advanceTimersByTimeAsync(STALL_MS * 2);
+    expect(videoStatus()!.textContent).toBe(GUEST_WAITING_TEXT);
+    expect(videoStatus()!.hidden).toBe(false);
+  });
+
+  it("host-lost solta o srcObject e os listeners da track", async () => {
+    const t = fakeTrack();
+    await enterWithTrack(t);
+    emit("session://welcome", { animal: "duck", aspect: 2 });
+    const v = videoEl()!;
+    emit("session://host-lost");
+    expect(v.srcObject).toBeNull();
+    expect(t.listenerCount()).toBe(0);
   });
 });
