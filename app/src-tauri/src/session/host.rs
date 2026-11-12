@@ -5,12 +5,13 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use dm_protocol::{
-    check_version, decode, encode, sanitize_name, Animal, Channel, GuestMsg, HostMsg, InputFrame,
-    PlayerId, RejectReason, RosterEntry, Snapshot, Vec2,
+    check_version, decode, encode, sanitize_chat, sanitize_name, Animal, Channel, Emote, GuestMsg,
+    HostMsg, InputFrame, PlayerId, RejectReason, RosterEntry, Snapshot, Vec2,
 };
 use dm_sim::{SimError, World};
 
 use super::net::{NetIn, Out, PeerId};
+use super::rate::{Cooldown, TokenBucket};
 use super::HOST_PLAYER;
 
 /// Um `Snapshot` em `State` a cada 3 ticks (60 Hz → 20 Hz).
@@ -19,6 +20,12 @@ pub const SNAPSHOT_EVERY_TICKS: u64 = 3;
 pub const SLEEP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Inputs aceitos por peer em cada janela de 1 s.
 pub const MAX_INPUTS_PER_SEC: u32 = 120;
+/// Chats seguidos que um jogador pode mandar antes de esperar a recarga.
+pub const CHAT_BURST: u32 = 3;
+/// Recarga de 1 chat no limite de cada jogador.
+pub const CHAT_REFILL: Duration = Duration::from_secs(2);
+/// Intervalo mínimo entre dois emotes do mesmo jogador.
+pub const EMOTE_COOLDOWN: Duration = Duration::from_secs(1);
 
 const INPUT_WINDOW: Duration = Duration::from_secs(1);
 const GUEST_FALLBACK_NAME: &str = "Convidado";
@@ -34,9 +41,29 @@ struct Player {
     peer: Option<PeerId>,
     /// Quando o peer caiu; `Some` enquanto o pet dorme.
     asleep_since: Option<Instant>,
+    /// Limites de chat e emote: ficam com o jogador (sobrevivem ao rejoin) e somem com ele.
+    chat_limit: TokenBucket,
+    emote_limit: Cooldown,
 }
 
 impl Player {
+    fn new(
+        name: String,
+        animal: Animal,
+        rejoin_token: Option<u64>,
+        peer: Option<PeerId>,
+    ) -> Player {
+        Player {
+            name,
+            animal,
+            rejoin_token,
+            peer,
+            asleep_since: None,
+            chat_limit: TokenBucket::new(CHAT_BURST, CHAT_REFILL),
+            emote_limit: Cooldown::new(EMOTE_COOLDOWN),
+        }
+    }
+
     /// Dorme há mais de `SLEEP_TIMEOUT`: não religa mais e sai no próximo `tick`.
     fn sleep_expired(&self, now: Instant) -> bool {
         self.asleep_since
@@ -53,6 +80,11 @@ struct Peer {
 }
 
 impl Peer {
+    /// Admitido: recebeu `Welcome` e joga. Só ele recebe snapshots, vídeo, roster e chat.
+    fn admitted(&self) -> bool {
+        self.player.is_some()
+    }
+
     /// Janela fixa de 1 s ancorada no primeiro input depois que a anterior venceu.
     fn allow_input(&mut self, now: Instant) -> bool {
         match self.window_start {
@@ -92,13 +124,7 @@ impl HostSession {
         let mut players = BTreeMap::new();
         players.insert(
             HOST_PLAYER,
-            Player {
-                name: sanitize_name(host_name, "Host"),
-                animal: host_animal,
-                rejoin_token: None,
-                peer: None,
-                asleep_since: None,
-            },
+            Player::new(sanitize_name(host_name, "Host"), host_animal, None, None),
         );
         HostSession {
             world,
@@ -131,6 +157,18 @@ impl HostSession {
         self.world.apply_input(HOST_PLAYER, frame);
     }
 
+    /// Chat do próprio Host: mesmas regras e limites de um convidado.
+    #[cfg_attr(not(test), expect(dead_code, reason = "os comandos da Task 4 chamam"))]
+    pub fn host_chat(&mut self, text: &str, now: Instant) -> Vec<Out> {
+        self.chat_from(HOST_PLAYER, text, now)
+    }
+
+    /// Emote do próprio Host: mesmas regras e limites de um convidado.
+    #[cfg_attr(not(test), expect(dead_code, reason = "os comandos da Task 4 chamam"))]
+    pub fn host_emote(&mut self, emote: Emote, now: Instant) -> Vec<Out> {
+        self.emote_from(HOST_PLAYER, emote, now)
+    }
+
     pub fn set_host_autonomous(&mut self, on: bool) {
         self.world.set_autonomous(HOST_PLAYER, on);
     }
@@ -157,15 +195,7 @@ impl HostSession {
         self.ticks += 1;
         if self.ticks.is_multiple_of(SNAPSHOT_EVERY_TICKS) {
             let bytes = encode(&HostMsg::Snapshot(self.world.snapshot()));
-            for (peer, state) in &self.peers {
-                if state.player.is_some() {
-                    out.push(Out::Send {
-                        peer: *peer,
-                        channel: Channel::State,
-                        bytes: bytes.clone(),
-                    });
-                }
-            }
+            out.extend(self.to_admitted(Channel::State, &bytes));
         }
         out
     }
@@ -219,6 +249,14 @@ impl HostSession {
                 self.on_input(peer, frame, now);
                 Vec::new()
             }
+            (GuestMsg::Chat { text }, Channel::Events) => match self.admitted_player(peer) {
+                Some(id) => self.chat_from(id, &text, now),
+                None => Vec::new(),
+            },
+            (GuestMsg::Emote(emote), Channel::Events) => match self.admitted_player(peer) {
+                Some(id) => self.emote_from(id, emote, now),
+                None => Vec::new(),
+            },
             (_, channel) => {
                 log::debug!("peer {peer}: mensagem no canal errado ({channel:?}); ignorada");
                 Vec::new()
@@ -272,13 +310,12 @@ impl HostSession {
         }
         self.players.insert(
             id,
-            Player {
-                name: sanitize_name(name, GUEST_FALLBACK_NAME),
-                animal: desired,
-                rejoin_token: self.fresh_token(token),
-                peer: Some(peer),
-                asleep_since: None,
-            },
+            Player::new(
+                sanitize_name(name, GUEST_FALLBACK_NAME),
+                desired,
+                self.fresh_token(token),
+                Some(peer),
+            ),
         );
         self.bind(peer, id)
     }
@@ -350,6 +387,66 @@ impl HostSession {
         self.world.apply_input(id, frame);
     }
 
+    /// Jogador do peer, se ele já foi admitido. O autor de chat e emote vem sempre daqui.
+    fn admitted_player(&self, peer: PeerId) -> Option<PlayerId> {
+        let id = self.peers.get(&peer).and_then(|p| p.player);
+        if id.is_none() {
+            log::debug!("peer {peer}: chat ou emote antes do Welcome; ignorado");
+        }
+        id
+    }
+
+    /// Chat de um jogador: sanitiza, aplica o limite dele e, se passar, manda a todos os
+    /// admitidos (inclusive o autor) e à UI local. Texto vazio não gasta o limite.
+    fn chat_from(&mut self, from: PlayerId, text: &str, now: Instant) -> Vec<Out> {
+        let Some(text) = sanitize_chat(text) else {
+            log::debug!("jogador {}: chat vazio; ignorado", from.0);
+            return Vec::new();
+        };
+        let Some(player) = self.players.get_mut(&from) else {
+            return Vec::new();
+        };
+        if !player.chat_limit.allow(now) {
+            log::debug!("jogador {}: chat acima do limite; descartado", from.0);
+            return Vec::new();
+        }
+        let bytes = encode(&HostMsg::Chat {
+            from,
+            text: text.clone(),
+        });
+        let mut out = self.to_admitted(Channel::Events, &bytes);
+        out.push(Out::Chat { from, text });
+        out
+    }
+
+    /// Emote de um jogador: aplica o intervalo mínimo dele e repassa como o chat.
+    fn emote_from(&mut self, from: PlayerId, emote: Emote, now: Instant) -> Vec<Out> {
+        let Some(player) = self.players.get_mut(&from) else {
+            return Vec::new();
+        };
+        if !player.emote_limit.allow(now) {
+            log::debug!("jogador {}: emote antes do intervalo; descartado", from.0);
+            return Vec::new();
+        }
+        let bytes = encode(&HostMsg::Emote { from, emote });
+        let mut out = self.to_admitted(Channel::Events, &bytes);
+        out.push(Out::Emote { from, emote });
+        out
+    }
+
+    /// Os mesmos bytes para cada peer admitido.
+    fn to_admitted(&self, channel: Channel, bytes: &[u8]) -> Vec<Out> {
+        self.peers
+            .iter()
+            .filter(|(_, state)| state.admitted())
+            .map(|(peer, _)| Out::Send {
+                peer: *peer,
+                channel,
+                bytes: bytes.to_vec(),
+            })
+            .collect()
+    }
+
     fn on_closed(&mut self, peer: PeerId, now: Instant) -> Vec<Out> {
         let Some(state) = self.peers.remove(&peer) else {
             return Vec::new();
@@ -405,7 +502,7 @@ impl HostSession {
             .map(|(peer, state)| Out::Send {
                 peer: *peer,
                 channel: Channel::Events,
-                bytes: if state.player.is_some() {
+                bytes: if state.admitted() {
                     roster_bytes.clone()
                 } else {
                     lobby_bytes.clone()
@@ -428,7 +525,7 @@ mod tests {
     use crate::session::HOST_PLAYER;
     use dm_protocol::{
         decode, encode, AnimState, Channel, GuestMsg, HostMsg, PetState, PlayerId, RejectReason,
-        PROTOCOL_VERSION,
+        MAX_CHAT_CHARS, PROTOCOL_VERSION,
     };
 
     const ASPECT: f32 = 16.0 / 9.0;
@@ -476,7 +573,7 @@ mod tests {
                     channel,
                     bytes,
                 } => Some((*peer, *channel, decode::<HostMsg>(bytes).unwrap())),
-                Out::Roster(_) | Out::Video { .. } => None,
+                Out::Roster(_) | Out::Video { .. } | Out::Chat { .. } | Out::Emote { .. } => None,
             })
             .collect()
     }
@@ -484,7 +581,7 @@ mod tests {
     fn local_roster(outs: &[Out]) -> Option<Vec<RosterEntry>> {
         outs.iter().rev().find_map(|o| match o {
             Out::Roster(r) => Some(r.clone()),
-            Out::Send { .. } | Out::Video { .. } => None,
+            Out::Send { .. } | Out::Video { .. } | Out::Chat { .. } | Out::Emote { .. } => None,
         })
     }
 
@@ -493,7 +590,7 @@ mod tests {
         outs.iter()
             .filter_map(|o| match o {
                 Out::Video { peer, on } => Some((*peer, *on)),
-                Out::Send { .. } | Out::Roster(_) => None,
+                Out::Send { .. } | Out::Roster(_) | Out::Chat { .. } | Out::Emote { .. } => None,
             })
             .collect()
     }
@@ -1020,5 +1117,324 @@ mod tests {
         s.handle(NetIn::PeerClosed(9), now);
         let outs = join(&mut s, 11, Animal::Horse, 42, now + Duration::from_secs(5));
         assert_eq!(videos(&outs), vec![(11, true)]);
+    }
+
+    fn chat(text: &str) -> Vec<u8> {
+        encode(&GuestMsg::Chat { text: text.into() })
+    }
+
+    fn emote(e: Emote) -> Vec<u8> {
+        encode(&GuestMsg::Emote(e))
+    }
+
+    /// Só os `Chat`/`Emote` locais, na ordem.
+    fn locals(outs: &[Out]) -> Vec<Out> {
+        outs.iter()
+            .filter(|o| matches!(o, Out::Chat { .. } | Out::Emote { .. }))
+            .cloned()
+            .collect()
+    }
+
+    /// Esperado de um chat aceito: o `HostMsg::Chat` para cada peer (na ordem) e o local.
+    fn chat_outs(peers: &[PeerId], from: PlayerId, text: &str) -> Vec<Out> {
+        let msg = HostMsg::Chat {
+            from,
+            text: text.into(),
+        };
+        let mut out: Vec<Out> = peers
+            .iter()
+            .map(|p| send(*p, Channel::Events, &msg))
+            .collect();
+        out.push(Out::Chat {
+            from,
+            text: text.into(),
+        });
+        out
+    }
+
+    fn emote_outs(peers: &[PeerId], from: PlayerId, e: Emote) -> Vec<Out> {
+        let msg = HostMsg::Emote { from, emote: e };
+        let mut out: Vec<Out> = peers
+            .iter()
+            .map(|p| send(*p, Channel::Events, &msg))
+            .collect();
+        out.push(Out::Emote { from, emote: e });
+        out
+    }
+
+    #[test]
+    fn guest_chat_broadcast() {
+        let mut s = session();
+        let now = Instant::now();
+        join(&mut s, 7, Animal::Capybara, 1, now);
+        join(&mut s, 8, Animal::Horse, 2, now);
+        // Peer no lobby não recebe nada.
+        s.handle(NetIn::PeerOpened(9), now);
+        let outs = s.handle(recv(7, Channel::Events, chat("oi gente")), now);
+        assert_eq!(outs, chat_outs(&[7, 8], PlayerId(1), "oi gente"));
+
+        let outs = s.handle(recv(8, Channel::Events, emote(Emote::Heart)), now);
+        assert_eq!(outs, emote_outs(&[7, 8], PlayerId(2), Emote::Heart));
+    }
+
+    #[test]
+    fn chat_from_lobby_ignored() {
+        let mut s = session();
+        let now = Instant::now();
+        join(&mut s, 7, Animal::Capybara, 1, now);
+        s.handle(NetIn::PeerOpened(9), now);
+        assert!(s
+            .handle(recv(9, Channel::Events, chat("oi")), now)
+            .is_empty());
+        assert!(s
+            .handle(recv(9, Channel::Events, emote(Emote::Wow)), now)
+            .is_empty());
+        // Peer rejeitado (versão errada) continua no lobby: também não fala.
+        s.handle(
+            recv(9, Channel::Events, hello_v(99, "A", Animal::Horse, 1)),
+            now,
+        );
+        assert!(s
+            .handle(recv(9, Channel::Events, chat("oi")), now)
+            .is_empty());
+        // Peer desconhecido também não.
+        assert!(s
+            .handle(recv(99, Channel::Events, chat("oi")), now)
+            .is_empty());
+    }
+
+    #[test]
+    fn chat_wrong_channel_ignored() {
+        let mut s = session();
+        let now = Instant::now();
+        join(&mut s, 7, Animal::Capybara, 1, now);
+        for channel in [Channel::Input, Channel::State] {
+            assert!(s.handle(recv(7, channel, chat("oi")), now).is_empty());
+            assert!(s
+                .handle(recv(7, channel, emote(Emote::Wow)), now)
+                .is_empty());
+        }
+        // O canal errado não gastou o limite: os 3 chats e o emote ainda passam.
+        for _ in 0..3 {
+            assert!(!locals(&s.handle(recv(7, Channel::Events, chat("oi")), now)).is_empty());
+        }
+        assert!(!locals(&s.handle(recv(7, Channel::Events, emote(Emote::Wow)), now)).is_empty());
+    }
+
+    #[test]
+    fn chat_sanitized_and_empty_dropped() {
+        let mut s = session();
+        let now = Instant::now();
+        join(&mut s, 7, Animal::Capybara, 1, now);
+        let outs = s.handle(
+            recv(
+                7,
+                Channel::Events,
+                chat("  a\u{0}b\n\u{202E}c   d\u{200B} "),
+            ),
+            now,
+        );
+        assert_eq!(outs, chat_outs(&[7], PlayerId(1), "abc d"));
+
+        for junk in ["     ", "\u{200B}\u{202E}\u{FEFF}", "\n\t\r", ""] {
+            assert!(
+                s.handle(recv(7, Channel::Events, chat(junk)), now)
+                    .is_empty(),
+                "{junk:?}"
+            );
+        }
+        // Texto gigante sai cortado.
+        let outs = s.handle(recv(7, Channel::Events, chat(&"x".repeat(10_000))), now);
+        match locals(&outs).as_slice() {
+            [Out::Chat { text, .. }] => assert_eq!(text.chars().count(), MAX_CHAT_CHARS),
+            other => panic!("esperava um Chat local, veio {other:?}"),
+        }
+        // Lixo no canal events não derruba nem sai.
+        assert!(s
+            .handle(recv(7, Channel::Events, vec![5, 0xFF, 0xFF, 0xFF]), now)
+            .is_empty());
+    }
+
+    #[test]
+    fn chat_rate_limited() {
+        let mut s = session();
+        let t0 = Instant::now();
+        join(&mut s, 7, Animal::Capybara, 1, t0);
+        join(&mut s, 8, Animal::Horse, 2, t0);
+        let mut outs = Vec::new();
+        for n in 0..5 {
+            outs.extend(s.handle(recv(7, Channel::Events, chat(&format!("m{n}"))), t0));
+        }
+        let texts: Vec<_> = locals(&outs)
+            .into_iter()
+            .map(|o| match o {
+                Out::Chat { text, .. } => text,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, ["m0", "m1", "m2"]);
+        // O que foi barrado não chega a ninguém.
+        assert_eq!(decode_out(&outs).len(), 6);
+
+        // Outro jogador tem o próprio limite.
+        assert!(!locals(&s.handle(recv(8, Channel::Events, chat("eu")), t0)).is_empty());
+
+        let t1 = t0 + Duration::from_secs(2);
+        let mut outs = Vec::new();
+        for n in 5..8 {
+            outs.extend(s.handle(recv(7, Channel::Events, chat(&format!("m{n}"))), t1));
+        }
+        assert_eq!(
+            locals(&outs),
+            vec![Out::Chat {
+                from: PlayerId(1),
+                text: "m5".into()
+            }]
+        );
+
+        // Flood de 100 por segundo durante 10 s: no máximo 3 + 10/2.
+        let mut accepted = 0;
+        for ms in (0..10_000u64).step_by(10) {
+            let now = t1 + Duration::from_secs(10) + Duration::from_millis(ms);
+            accepted += locals(&s.handle(recv(7, Channel::Events, chat("spam")), now)).len();
+        }
+        assert!(accepted <= 3 + 5, "aceitos = {accepted}");
+    }
+
+    #[test]
+    fn emote_cooldown() {
+        let mut s = session();
+        let t0 = Instant::now();
+        join(&mut s, 7, Animal::Capybara, 1, t0);
+        let mut outs = s.handle(recv(7, Channel::Events, emote(Emote::Heart)), t0);
+        outs.extend(s.handle(recv(7, Channel::Events, emote(Emote::Laugh)), t0));
+        assert_eq!(outs, emote_outs(&[7], PlayerId(1), Emote::Heart));
+        let half = t0 + Duration::from_millis(500);
+        assert!(s
+            .handle(recv(7, Channel::Events, emote(Emote::Laugh)), half)
+            .is_empty());
+        let t1 = t0 + Duration::from_secs(1);
+        let outs = s.handle(recv(7, Channel::Events, emote(Emote::Laugh)), t1);
+        assert_eq!(outs, emote_outs(&[7], PlayerId(1), Emote::Laugh));
+        // Emote e chat têm limites separados.
+        assert!(!locals(&s.handle(recv(7, Channel::Events, chat("oi")), t1)).is_empty());
+    }
+
+    #[test]
+    fn author_is_peer_player() {
+        let mut s = session();
+        let now = Instant::now();
+        join(&mut s, 7, Animal::Capybara, 1, now);
+        join(&mut s, 8, Animal::Horse, 2, now);
+        // Mesmo um texto que imita um autor sai com o `from` do peer que mandou.
+        let outs = s.handle(recv(8, Channel::Events, chat("from: 0 Tamy: oi")), now);
+        let sent = decode_out(&outs);
+        assert_eq!(sent.len(), 2);
+        for (_, _, msg) in sent {
+            assert!(
+                matches!(
+                    msg,
+                    HostMsg::Chat {
+                        from: PlayerId(2),
+                        ..
+                    }
+                ),
+                "{msg:?}"
+            );
+        }
+        assert!(matches!(
+            locals(&outs).as_slice(),
+            [Out::Chat {
+                from: PlayerId(2),
+                ..
+            }]
+        ));
+        // Um `HostMsg::Chat` forjado vindo do convidado não decodifica como `GuestMsg::Chat`
+        // com outro autor: ou vira lixo, ou é outra variante; nunca sai em nome do Host.
+        let forged = encode(&HostMsg::Chat {
+            from: HOST_PLAYER,
+            text: "sou o Host".into(),
+        });
+        let outs = s.handle(recv(8, Channel::Events, forged), now);
+        assert!(outs.iter().all(|o| !matches!(
+            o,
+            Out::Chat { from, .. } | Out::Emote { from, .. } if *from != PlayerId(2)
+        )));
+        assert!(decode_out(&outs).iter().all(|(_, _, m)| !matches!(
+            m,
+            HostMsg::Chat { from, .. } | HostMsg::Emote { from, .. } if *from != PlayerId(2)
+        )));
+    }
+
+    #[test]
+    fn host_chat_and_emote() {
+        let mut s = session();
+        let t0 = Instant::now();
+        join(&mut s, 7, Animal::Capybara, 1, t0);
+        join(&mut s, 8, Animal::Horse, 2, t0);
+        s.handle(NetIn::PeerOpened(9), t0);
+
+        let outs = s.host_chat("  olá\u{202E} ", t0);
+        assert_eq!(outs, chat_outs(&[7, 8], HOST_PLAYER, "olá"));
+        assert!(s.host_chat("   ", t0).is_empty());
+        assert!(!s.host_chat("2", t0).is_empty());
+        assert!(!s.host_chat("3", t0).is_empty());
+        assert!(s.host_chat("4", t0).is_empty(), "o Host respeita o limite");
+        assert!(!s.host_chat("5", t0 + Duration::from_secs(2)).is_empty());
+
+        let outs = s.host_emote(Emote::Music, t0);
+        assert_eq!(outs, emote_outs(&[7, 8], HOST_PLAYER, Emote::Music));
+        assert!(s.host_emote(Emote::Music, t0).is_empty());
+        assert!(!s
+            .host_emote(Emote::Question, t0 + Duration::from_secs(1))
+            .is_empty());
+
+        // Sem convidados, só a UI local.
+        let mut alone = session();
+        assert_eq!(alone.host_chat("oi", t0), chat_outs(&[], HOST_PLAYER, "oi"));
+    }
+
+    #[test]
+    fn rejoin_keeps_author() {
+        let mut s = session();
+        let t0 = Instant::now();
+        join(&mut s, 7, Animal::Capybara, 42, t0);
+        join(&mut s, 8, Animal::Horse, 43, t0);
+        for _ in 0..3 {
+            s.handle(recv(7, Channel::Events, chat("oi")), t0);
+        }
+        s.handle(recv(7, Channel::Events, emote(Emote::Heart)), t0);
+
+        // Dormindo, o pet recebe os balões dos outros e o peer caído sai do broadcast.
+        s.handle(NetIn::PeerClosed(7), t0);
+        let outs = s.handle(recv(8, Channel::Events, chat("cadê?")), t0);
+        assert_eq!(outs, chat_outs(&[8], PlayerId(2), "cadê?"));
+        // O peer morto não fala mais.
+        assert!(s
+            .handle(recv(7, Channel::Events, chat("fantasma")), t0)
+            .is_empty());
+
+        // Volta pelo rejoin em outro peer: mesmo PlayerId e o mesmo limite de antes.
+        join(&mut s, 11, Animal::Chicken, 42, t0);
+        assert!(s
+            .handle(recv(11, Channel::Events, chat("voltei")), t0)
+            .is_empty());
+        assert!(s
+            .handle(recv(11, Channel::Events, emote(Emote::Wow)), t0)
+            .is_empty());
+        let t1 = t0 + Duration::from_secs(2);
+        let outs = s.handle(recv(11, Channel::Events, chat("voltei")), t1);
+        assert_eq!(outs, chat_outs(&[8, 11], PlayerId(1), "voltei"));
+        let outs = s.handle(recv(11, Channel::Events, emote(Emote::Wow)), t1);
+        assert_eq!(outs, emote_outs(&[8, 11], PlayerId(1), Emote::Wow));
+
+        // Rejoin com o peer antigo ainda vivo: o antigo é esquecido e não fala mais.
+        let t2 = t1 + Duration::from_secs(4);
+        join(&mut s, 12, Animal::Chicken, 42, t2);
+        assert!(s
+            .handle(recv(11, Channel::Events, chat("velho")), t2)
+            .is_empty());
+        let outs = s.handle(recv(12, Channel::Events, chat("novo")), t2);
+        assert_eq!(outs, chat_outs(&[8, 12], PlayerId(1), "novo"));
     }
 }

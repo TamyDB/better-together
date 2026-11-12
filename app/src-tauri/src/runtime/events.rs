@@ -15,6 +15,8 @@ pub const LOBBY_EVENT: &str = "session://lobby";
 pub const WELCOME_EVENT: &str = "session://welcome";
 pub const REJECTED_EVENT: &str = "session://rejected";
 pub const HOST_LOST_EVENT: &str = "session://host-lost";
+pub const CHAT_EVENT: &str = "session://chat";
+pub const EMOTE_EVENT: &str = "session://emote";
 
 /// Nome do evento e payload, sem depender de `AppHandle` (testável).
 pub type UiEvent = (&'static str, Value);
@@ -35,6 +37,8 @@ pub fn out_event(out: Out) -> UiEvent {
         ),
         Out::Roster(roster) => (ROSTER_EVENT, json!(roster)),
         Out::Video { peer, on } => (NET_VIDEO_EVENT, json!({ "peer": peer, "on": on })),
+        Out::Chat { from, text } => (CHAT_EVENT, json!({ "from": from, "text": text })),
+        Out::Emote { from, emote } => (EMOTE_EVENT, json!({ "from": from, "emote": emote })),
     }
 }
 
@@ -71,7 +75,7 @@ pub fn emit_to_ui(app: &AppHandle, (name, payload): UiEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dm_protocol::{Animal, Channel, PlayerId, RosterEntry};
+    use dm_protocol::{Animal, Channel, Emote, PlayerId, RosterEntry};
 
     #[test]
     fn net_send_payload() {
@@ -98,6 +102,26 @@ mod tests {
         assert_eq!(
             out_event(Out::Video { peer: 9, on: false }),
             ("net://video", json!({ "peer": 9, "on": false }))
+        );
+    }
+
+    #[test]
+    fn chat_and_emote_payloads() {
+        let chat = Out::Chat {
+            from: PlayerId(2),
+            text: "oi".into(),
+        };
+        assert_eq!(
+            out_event(chat),
+            ("session://chat", json!({ "from": 2, "text": "oi" }))
+        );
+        let emote = Out::Emote {
+            from: PlayerId(0),
+            emote: Emote::Heart,
+        };
+        assert_eq!(
+            out_event(emote),
+            ("session://emote", json!({ "from": 0, "emote": "heart" }))
         );
     }
 

@@ -1,6 +1,6 @@
 //! Fronteira entre a sessão (pura) e o transporte WebRTC.
 
-use dm_protocol::{Channel, RosterEntry};
+use dm_protocol::{Channel, Emote, PlayerId, RosterEntry};
 
 /// Identificador local de uma conexão com um convidado.
 pub type PeerId = u64;
@@ -29,4 +29,8 @@ pub enum Out {
     Roster(Vec<RosterEntry>),
     /// Liga (`on`) ou corta o vídeo do Host para o peer: só quem foi admitido vê a tela.
     Video { peer: PeerId, on: bool },
+    /// Mensagem de chat aceita pelo Host, para a UI local (o mesmo texto que vai aos peers).
+    Chat { from: PlayerId, text: String },
+    /// Emote aceito pelo Host, para a UI local.
+    Emote { from: PlayerId, emote: Emote },
 }
