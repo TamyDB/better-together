@@ -69,6 +69,10 @@ impl PetMode {
     }
 
     pub fn on_key_at(&self, key: Key, down: bool, now: Instant) {
+        // Emotes ainda não saem do modo bichinho; também não contam como tecla de movimento.
+        if matches!(key, Key::Emote(_)) {
+            return;
+        }
         if key == Key::Esc {
             if down {
                 self.exit();
@@ -109,7 +113,7 @@ impl PetMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dm_protocol::InputFrame;
+    use dm_protocol::{Emote, InputFrame};
     use std::time::{Duration, Instant};
 
     #[derive(Debug, PartialEq)]
@@ -159,6 +163,18 @@ mod tests {
         mode.on_key(Key::W, true);
         mode.keep_alive();
         assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn emote_keys_are_ignored_for_now() {
+        let (sink, mode) = setup();
+        mode.toggle();
+        sink.0.lock().unwrap().clear();
+        mode.on_key(Key::Emote(Emote::Wow), true);
+        mode.on_key(Key::Emote(Emote::Wow), false);
+        mode.keep_alive();
+        assert!(sink.0.lock().unwrap().is_empty());
+        assert!(mode.is_on());
     }
 
     #[test]

@@ -51,7 +51,12 @@ struct GuestLoop<E> {
 impl<E: FnMut(UiEvent)> GuestLoop<E> {
     fn apply(&mut self, cmd: GuestCommand) {
         match cmd {
-            GuestCommand::Key(key, down) => self.client.set_key(key, down),
+            GuestCommand::Key(key, down) => {
+                self.client.set_key(key, down);
+                for out in self.client.take_outgoing() {
+                    (self.emit)(out_event(out));
+                }
+            }
             GuestCommand::Choose { name, animal } => {
                 let out = self.client.choose(&name, animal);
                 (self.emit)(out_event(out));
@@ -125,8 +130,8 @@ mod tests {
     use crate::runtime::backlog::MAX_QUEUED_RECV;
     use crate::session::guest::{HOST_PEER, HOST_SILENCE_TICKS};
     use dm_protocol::{
-        encode, AnimState, Channel, Facing, HostMsg, PetState, PlayerId, RejectReason, Snapshot,
-        Vec2,
+        decode, encode, AnimState, Channel, Emote, Facing, GuestMsg, HostMsg, PetState, PlayerId,
+        RejectReason, Snapshot, Vec2,
     };
     use serde_json::json;
     use std::cell::RefCell;
@@ -236,6 +241,28 @@ mod tests {
         let names: Vec<&str> = events.iter().map(|(n, _)| *n).collect();
         assert_eq!(names, vec!["sim://snapshot", "net://send", "net://send"]);
         assert_eq!(events[1].1["channel"], json!("input"));
+    }
+
+    #[test]
+    fn emote_key_is_sent_without_waiting_for_a_tick() {
+        let (handle, mut body, events) = guest_loop();
+        handle.send(from_host(&welcome()));
+        let now = Instant::now();
+        assert!(body.drain(now));
+        events.borrow_mut().clear();
+
+        handle.send(GuestCommand::Key(Key::Emote(Emote::Angry), true));
+        handle.send(GuestCommand::Key(Key::Emote(Emote::Angry), false));
+        assert!(body.drain(now));
+        let events = events.borrow();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "net://send");
+        assert_eq!(events[0].1["channel"], json!("events"));
+        let bytes: Vec<u8> = serde_json::from_value(events[0].1["bytes"].clone()).unwrap();
+        assert_eq!(
+            decode::<GuestMsg>(&bytes).unwrap(),
+            GuestMsg::Emote(Emote::Angry)
+        );
     }
 
     #[test]

@@ -52,6 +52,8 @@ pub fn guest_event(ev: GuestEvent) -> UiEvent {
         GuestEvent::Rejected(reason) => (REJECTED_EVENT, rejected_payload(&reason)),
         GuestEvent::Roster(roster) => (ROSTER_EVENT, json!(roster)),
         GuestEvent::HostLost => (HOST_LOST_EVENT, Value::Null),
+        GuestEvent::Chat { from, text } => (CHAT_EVENT, json!({ "from": from, "text": text })),
+        GuestEvent::Emote { from, emote } => (EMOTE_EVENT, json!({ "from": from, "emote": emote })),
     }
 }
 
@@ -121,6 +123,23 @@ mod tests {
         };
         assert_eq!(
             out_event(emote),
+            ("session://emote", json!({ "from": 0, "emote": "heart" }))
+        );
+        // O convidado emite o mesmo JSON que o Host.
+        let chat = GuestEvent::Chat {
+            from: PlayerId(2),
+            text: "oi".into(),
+        };
+        assert_eq!(
+            guest_event(chat),
+            ("session://chat", json!({ "from": 2, "text": "oi" }))
+        );
+        let emote = GuestEvent::Emote {
+            from: PlayerId(0),
+            emote: Emote::Heart,
+        };
+        assert_eq!(
+            guest_event(emote),
             ("session://emote", json!({ "from": 0, "emote": "heart" }))
         );
     }

@@ -1,6 +1,6 @@
-use dm_protocol::InputFrame;
+use dm_protocol::{Emote, InputFrame};
 
-/// Teclas que o modo bichinho usa.
+/// Teclas que o modo bichinho e o viewer do convidado usam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
     W,
@@ -9,6 +9,8 @@ pub enum Key {
     D,
     Shift,
     Esc,
+    /// `1`–`6`, na ordem de `Emote::ALL`. Não é tecla de movimento.
+    Emote(Emote),
 }
 
 impl Key {
@@ -22,6 +24,10 @@ impl Key {
             0x44 => Some(Key::D),
             0x10 | 0xA0 | 0xA1 => Some(Key::Shift),
             0x1B => Some(Key::Esc),
+            0x31..=0x36 => Emote::ALL
+                .get(usize::from(vk - 0x31))
+                .copied()
+                .map(Key::Emote),
             _ => None,
         }
     }
@@ -35,6 +41,12 @@ impl Key {
             "KeyD" => Some(Key::D),
             "ShiftLeft" | "ShiftRight" => Some(Key::Shift),
             "Escape" => Some(Key::Esc),
+            "Digit1" => Some(Key::Emote(Emote::Heart)),
+            "Digit2" => Some(Key::Emote(Emote::Laugh)),
+            "Digit3" => Some(Key::Emote(Emote::Wow)),
+            "Digit4" => Some(Key::Emote(Emote::Angry)),
+            "Digit5" => Some(Key::Emote(Emote::Music)),
+            "Digit6" => Some(Key::Emote(Emote::Question)),
             _ => None,
         }
     }
@@ -57,7 +69,7 @@ impl KeyState {
             Key::S => self.s = down,
             Key::D => self.d = down,
             Key::Shift => self.shift = down,
-            Key::Esc => {}
+            Key::Esc | Key::Emote(_) => {}
         }
     }
 
@@ -90,7 +102,7 @@ fn swallow_bit(key: Key) -> u8 {
         Key::S => 1 << 2,
         Key::D => 1 << 3,
         Key::Esc => 1 << 4,
-        Key::Shift => 0,
+        Key::Shift | Key::Emote(_) => 0,
     }
 }
 
@@ -101,6 +113,7 @@ fn swallow_bit(key: Key) -> u8 {
 ///   tecla "presa".
 /// - Shift nunca é engolido (para não quebrar Ctrl+Shift+P e Shift+Alt+Tab); o pet só o lê.
 /// - Key-ups sempre vão ao `PetMode`, para o movimento não ficar preso.
+/// - Teclas de emote passam direto, sem ir ao `PetMode`, até o modo bichinho tratá-las.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn filter_key(
     swallowed: u8,
@@ -109,7 +122,7 @@ pub fn filter_key(
     down: bool,
     modifier_down: bool,
 ) -> (u8, HookDecision) {
-    let Some(key) = key else {
+    let Some(key) = key.filter(|k| !matches!(k, Key::Emote(_))) else {
         return (
             swallowed,
             HookDecision {
@@ -160,6 +173,7 @@ pub fn filter_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dm_protocol::Emote;
 
     fn state(keys: &[Key]) -> KeyState {
         let mut s = KeyState::default();
@@ -193,6 +207,45 @@ mod tests {
         assert_eq!(Key::from_code("ShiftRight"), Some(Key::Shift));
         assert_eq!(Key::from_code("Escape"), Some(Key::Esc));
         assert_eq!(Key::from_code("KeyZ"), None);
+    }
+
+    #[test]
+    fn digits_are_emotes_in_order() {
+        let codes = ["Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6"];
+        for (i, emote) in Emote::ALL.into_iter().enumerate() {
+            assert_eq!(Key::from_code(codes[i]), Some(Key::Emote(emote)));
+            assert_eq!(Key::from_vk(0x31 + i as u16), Some(Key::Emote(emote)));
+        }
+        assert_eq!(Key::from_code("Digit1"), Some(Key::Emote(Emote::Heart)));
+        assert_eq!(Key::from_code("Digit6"), Some(Key::Emote(Emote::Question)));
+        assert_eq!(Key::from_code("Digit7"), None);
+        assert_eq!(Key::from_code("Digit0"), None);
+        assert_eq!(Key::from_code("Numpad1"), None);
+        assert_eq!(Key::from_vk(0x30), None);
+        assert_eq!(Key::from_vk(0x37), None);
+    }
+
+    #[test]
+    fn emote_does_not_touch_movement() {
+        let mut s = state(&[Key::D, Key::Shift]);
+        let before = s;
+        for emote in Emote::ALL {
+            s.set(Key::Emote(emote), true);
+            s.set(Key::Emote(emote), false);
+        }
+        assert_eq!(s, before);
+        assert_eq!(state(&[Key::Emote(Emote::Heart)]), KeyState::default());
+    }
+
+    #[test]
+    fn hook_leaves_emote_keys_alone_for_now() {
+        // Até o modo bichinho tratar emotes, os dígitos seguem como antes: nem engolidos nem
+        // repassados.
+        for down in [true, false] {
+            let (s, d) = on(0b1_0101, Key::Emote(Emote::Wow), down, false);
+            assert_eq!(s, 0b1_0101);
+            assert!(!d.swallow && !d.forward);
+        }
     }
 
     fn on(state: u8, key: Key, down: bool, modifier: bool) -> (u8, HookDecision) {
