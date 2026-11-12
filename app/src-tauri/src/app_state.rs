@@ -3,7 +3,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
 
-use dm_protocol::{Animal, Channel, InputFrame, RosterEntry, MAX_MESSAGE_BYTES};
+use dm_protocol::{sanitize_name, Animal, Channel, InputFrame, RosterEntry, MAX_MESSAGE_BYTES};
+use serde::{Deserialize, Serialize};
 
 use crate::input::keys::Key;
 use crate::pet_mode::PetMode;
@@ -19,6 +20,23 @@ pub enum Ended {
     None,
     Host,
     Guest,
+}
+
+/// Última entrada bem-sucedida numa sala; sobrevive ao "Voltar" e morre com o app, como o token.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LastJoin {
+    pub code: String,
+    pub name: String,
+    pub animal: Animal,
+}
+
+/// Código de sala já normalizado: 4 letras maiúsculas, hífen e 4 dígitos (`PATO-4821`).
+pub fn valid_code(code: &str) -> bool {
+    let b = code.as_bytes();
+    b.len() == 9
+        && b[..4].iter().all(u8::is_ascii_uppercase)
+        && b[4] == b'-'
+        && b[5..].iter().all(u8::is_ascii_digit)
 }
 
 pub enum Mode {
@@ -101,6 +119,8 @@ pub struct AppState {
     /// Um `host_start` em andamento (cria janelas fora do lock). Escrito sob o lock de `Mode`.
     starting: AtomicBool,
     rejoin_token: u64,
+    /// Lock próprio: nunca segurado junto com o de `Mode`.
+    last_join: Mutex<Option<LastJoin>>,
     pet_sink: Arc<PetSink>,
     pet_mode: Arc<PetMode>,
     host_services: Once,
@@ -127,6 +147,7 @@ impl AppState {
             mode: Mutex::new(Mode::Launcher),
             starting: AtomicBool::new(false),
             rejoin_token: non_zero_token(rand::random),
+            last_join: Mutex::new(None),
             pet_mode: Arc::new(PetMode::new(pet_sink.clone())),
             pet_sink,
             host_services: Once::new(),
@@ -136,6 +157,20 @@ impl AppState {
     /// Token único por execução: reentrar na sala depois de cair recupera o mesmo pet.
     pub fn rejoin_token(&self) -> u64 {
         self.rejoin_token
+    }
+
+    /// Guarda a escolha aceita pelo Host para a reconexão automática.
+    pub fn remember_join(&self, code: String, name: &str, animal: Animal) -> Result<(), String> {
+        if !valid_code(&code) {
+            return Err("código inválido".to_string());
+        }
+        let name = sanitize_name(name, "Jogador");
+        *lock(&self.last_join) = Some(LastJoin { code, name, animal });
+        Ok(())
+    }
+
+    pub fn last_join(&self) -> Option<LastJoin> {
+        lock(&self.last_join).clone()
     }
 
     /// Reserva o início de uma sessão de Host, recusando outra em andamento.
@@ -316,6 +351,37 @@ mod tests {
         state.end_session().unwrap();
         state.enter_guest(|| guest_handle().0).unwrap();
         assert_eq!(state.rejoin_token(), token);
+    }
+
+    #[test]
+    fn remember_join_rules() {
+        let state = AppState::new();
+        assert_eq!(state.last_join(), None);
+        state
+            .remember_join("PATO-4821".into(), "  Ana\n ", Animal::Duck)
+            .unwrap();
+        let expected = LastJoin {
+            code: "PATO-4821".into(),
+            name: "Ana".into(),
+            animal: Animal::Duck,
+        };
+        assert_eq!(state.last_join(), Some(expected.clone()));
+        for bad in [
+            "pato-4821",
+            "PATO4821",
+            "PATO-482",
+            "PATO-48211",
+            "PAT0-4821",
+        ] {
+            assert_eq!(
+                state.remember_join(bad.into(), "X", Animal::Horse),
+                Err("código inválido".to_string())
+            );
+        }
+        assert_eq!(state.last_join(), Some(expected.clone()));
+        state.enter_guest(|| guest_handle().0).unwrap();
+        state.end_session().unwrap();
+        assert_eq!(state.last_join(), Some(expected));
     }
 
     #[test]

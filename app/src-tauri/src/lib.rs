@@ -17,7 +17,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-use app_state::{parse_recv, AppState, Ended, Mode};
+use app_state::{parse_recv, AppState, Ended, LastJoin, Mode};
 use input::keys::Key;
 use net_config::NetConfig;
 use pet_mode::{PetMode, KEEP_ALIVE_MS};
@@ -112,6 +112,21 @@ fn guest_start(app: AppHandle, state: State<'_, AppState>) -> Result<(), String>
 }
 
 #[tauri::command]
+fn remember_join(
+    state: State<'_, AppState>,
+    code: String,
+    name: String,
+    animal: Animal,
+) -> Result<(), String> {
+    state.remember_join(code, &name, animal)
+}
+
+#[tauri::command]
+fn last_join(state: State<'_, AppState>) -> Option<LastJoin> {
+    state.last_join()
+}
+
+#[tauri::command]
 fn guest_choose(state: State<'_, AppState>, name: String, animal: Animal) -> Result<(), String> {
     state.guest_choose(name, animal)
 }
@@ -198,6 +213,8 @@ pub fn run() {
             host_roster,
             guest_start,
             guest_choose,
+            remember_join,
+            last_join,
             net_peer_opened,
             net_peer_closed,
             net_recv,

@@ -6,18 +6,16 @@ import { CONNECT_TIMEOUT_MS, deadline } from "../net/timeout";
 import { startRenderer } from "../render/canvas";
 import { fitRect } from "../render/fit";
 import { LOOK } from "../render/placeholder";
-import type { Animal, RosterEntry, Snapshot } from "../types";
+import type { Animal, LastJoin, RosterEntry, Snapshot } from "../types";
 import { ANIMAL_LABEL, lastCode, rejectMessage, rejoinChoice, type RejectReason } from "./labels";
 
 const ANIMALS = Object.keys(ANIMAL_LABEL) as Animal[];
 const VIEWER_W = 1280;
 const VIEWER_H = 720;
-/** Última entrada bem-sucedida; sobrevive ao reload do "Voltar" e morre com o app, como o token. */
-const LAST_KEY = "bt.last";
-
-function readLast(): unknown {
+/** Lembrança da última entrada, guardada pelo Rust; qualquer falha vira "sem lembrança". */
+async function readLast(): Promise<LastJoin | null> {
   try {
-    return JSON.parse(sessionStorage.getItem(LAST_KEY) ?? "null");
+    return (await invoke<LastJoin | null>("last_join")) ?? null;
   } catch {
     return null;
   }
@@ -119,11 +117,13 @@ function launcher(): void {
   const join = el("button", { text: "Entrar" });
   join.disabled = true;
   code.oninput = () => (join.disabled = normalizeCode(code.value) === null);
-  const saved = lastCode(readLast());
-  if (saved) {
-    code.value = saved;
-    join.disabled = false;
-  }
+  void readLast().then((last) => {
+    const saved = lastCode(last);
+    if (saved && !code.value) {
+      code.value = saved;
+      join.disabled = false;
+    }
+  });
 
   const nick = () => name.value.trim() || "Jogador";
   create.onclick = () => animal && void hostFlow(nick(), animal);
@@ -283,17 +283,23 @@ async function guestFlow(name: string, code: string): Promise<void> {
         taken = e.payload.taken;
         if (inViewer) return;
         if (!autoTried) {
+          // Marcado antes do await: um segundo lobby durante a leitura não tenta de novo.
           autoTried = true;
-          const again = rejoinChoice(readLast(), code);
-          if (again) {
-            autoPending = true;
+          autoPending = true;
+          void readLast().then((last) => {
+            const again = rejoinChoice(last, code);
+            if (inViewer || !again) {
+              autoPending = false;
+              if (!inViewer) lobby();
+              return;
+            }
             sentName = again.name;
             invoke("guest_choose", again).catch(() => {
               autoPending = false;
               lobby();
             });
-            return;
-          }
+          });
+          return;
         }
         if (!autoPending) lobby();
       }),
@@ -301,7 +307,7 @@ async function guestFlow(name: string, code: string): Promise<void> {
         firstReply.settle();
         inViewer = true;
         autoPending = false;
-        sessionStorage.setItem(LAST_KEY, JSON.stringify({ code, name: sentName, animal: e.payload.animal }));
+        invoke("remember_join", { code, name: sentName, animal: e.payload.animal }).catch(() => {});
         viewer?.dispose();
         invoke("enter_viewer").catch(() => {});
         viewer = showViewer(e.payload.aspect, leave);

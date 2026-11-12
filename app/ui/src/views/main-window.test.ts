@@ -21,8 +21,6 @@ vi.mock("../render/canvas", () => ({
 
 import { startMainWindow } from "./main-window";
 
-const LAST_KEY = "bt.last";
-
 /** DOM mínimo: só o que `main-window` usa, para exercitar a fiação sem navegador. */
 class FakeEl {
   children: FakeEl[] = [];
@@ -55,7 +53,8 @@ class FakeEl {
 }
 
 let app: FakeEl;
-let storage: Map<string, string>;
+/** Lembrança que o `last_join` devolve; `remember_join` a atualiza, como o Rust. */
+let last: unknown = null;
 let reload: ReturnType<typeof vi.fn>;
 
 function walk(e: FakeEl): FakeEl[] {
@@ -69,7 +68,8 @@ const nameInput = () => walk(app).find((e) => e.placeholder === "Seu nome")!;
 const flush = () => vi.advanceTimersByTimeAsync(0);
 const emit = (name: string, payload: unknown = null) => h.listeners.get(name)!({ payload });
 const chooses = () => h.invoke.mock.calls.filter((c) => c[0] === "guest_choose").map((c) => c[1]);
-const stored = () => JSON.parse(storage.get(LAST_KEY) ?? "null");
+const remembers = () =>
+  h.invoke.mock.calls.filter((c) => c[0] === "remember_join").map((c) => c[1]);
 
 async function launch(): Promise<void> {
   startMainWindow();
@@ -91,11 +91,15 @@ async function enter(net: Promise<unknown> = Promise.resolve({ stop: h.stop }), 
 beforeEach(() => {
   vi.useFakeTimers();
   h.invoke.mockClear();
-  h.invoke.mockImplementation(async () => undefined);
+  last = null;
+  h.invoke.mockImplementation(async (cmd: unknown, args: unknown) => {
+    if (cmd === "last_join") return last;
+    if (cmd === "remember_join") last = args;
+    return undefined;
+  });
   h.listeners.clear();
   h.startGuestNet.mockReset();
   h.stop.mockClear();
-  storage = new Map();
   reload = vi.fn();
   const body = new FakeEl("body");
   vi.stubGlobal("document", {
@@ -110,10 +114,6 @@ beforeEach(() => {
   });
   vi.stubGlobal("window", { addEventListener() {}, removeEventListener() {} });
   vi.stubGlobal("location", { reload });
-  vi.stubGlobal("sessionStorage", {
-    getItem: (k: string) => storage.get(k) ?? null,
-    setItem: (k: string, v: string) => void storage.set(k, v),
-  });
 });
 
 afterEach(() => {
@@ -185,51 +185,63 @@ describe("espera depois de conectar", () => {
   });
 });
 
-describe("bt.last", () => {
+describe("lembrança de reconexão", () => {
   const SAVED = { code: "PATO-4821", name: "Tamy", animal: "duck" };
 
   it("reconexão automática guarda o nome enviado, não o do campo vazio", async () => {
-    storage.set(LAST_KEY, JSON.stringify(SAVED));
+    last = SAVED;
     await enter();
     emit("session://lobby", { taken: [] });
+    await flush();
     expect(chooses()).toEqual([{ name: "Tamy", animal: "duck" }]);
     emit("session://welcome", { animal: "duck", aspect: 2 });
-    expect(stored()).toEqual(SAVED);
+    expect(remembers()).toEqual([SAVED]);
+  });
+
+  it("dois lobbies durante a leitura da lembrança escolhem uma vez só", async () => {
+    last = SAVED;
+    await enter();
+    emit("session://lobby", { taken: [] });
+    emit("session://lobby", { taken: ["horse"] });
+    await flush();
+    expect(chooses()).toEqual([{ name: "Tamy", animal: "duck" }]);
   });
 
   it("escolha manual guarda o nome do campo", async () => {
     await enter(undefined, "Ana");
     emit("session://lobby", { taken: [] });
+    await flush();
     byText("span", "Capivara")!;
     walk(app)
       .filter((e) => e.tag === "button" && e.className === "card")[1]
       .onclick?.();
     expect(chooses()).toEqual([{ name: "Ana", animal: "capybara" }]);
     emit("session://welcome", { animal: "capybara", aspect: 2 });
-    expect(stored()).toEqual({ code: "PATO-4821", name: "Ana", animal: "capybara" });
+    expect(remembers()).toEqual([{ code: "PATO-4821", name: "Ana", animal: "capybara" }]);
   });
 
   it("depois de a tentativa automática ser recusada, guarda o nome da escolha manual", async () => {
-    storage.set(LAST_KEY, JSON.stringify(SAVED));
+    last = SAVED;
     await enter(undefined, "Ana");
     emit("session://lobby", { taken: [] });
+    await flush();
     emit("session://rejected", { reason: "room_full" });
     walk(app)
       .filter((e) => e.tag === "button" && e.className === "card")[2]
       .onclick?.();
     emit("session://welcome", { animal: "horse", aspect: 2 });
-    expect(stored().name).toBe("Ana");
+    expect(remembers()).toEqual([{ code: "PATO-4821", name: "Ana", animal: "horse" }]);
   });
 
   it("pré-preenche o código da última sala e habilita Entrar", async () => {
-    storage.set(LAST_KEY, JSON.stringify(SAVED));
+    last = SAVED;
     await launch();
     expect(codeInput().value).toBe("PATO-4821");
     expect(byText("button", "Entrar")!.disabled).toBe(false);
   });
 
   it("sem lembrança válida o campo fica vazio", async () => {
-    storage.set(LAST_KEY, "{lixo");
+    last = "{lixo";
     await launch();
     expect(codeInput().value).toBe("");
     expect(byText("button", "Entrar")!.disabled).toBe(true);

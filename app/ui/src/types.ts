@@ -30,3 +30,10 @@ export interface RosterEntry {
   animal: Animal;
   asleep: boolean;
 }
+
+/** Última entrada bem-sucedida numa sala, guardada pelo Rust (`last_join`). */
+export interface LastJoin {
+  code: string;
+  name: string;
+  animal: Animal;
+}
