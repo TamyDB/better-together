@@ -32,4 +32,4 @@ O desenvolvimento é no Fedora. Os crates puros são testados no Linux; Win32, o
 ### Marcos
 M1 Fundação → M2 Rede → M3 Vídeo → M4 Social → M5 Travessuras → M6 Distribuição. Cada marco tem seu próprio plano em `docs/superpowers/plans/`.
 
-**Marco atual:** M3 Vídeo em andamento (plano `docs/superpowers/plans/2026-11-12-m3-video.md`, branch `m3-video`). E2E do M2 foi absorvido pelo E2E do M3 (Windows).
+**Marco atual:** M3 Vídeo implementado na branch `m3-video` (Tasks 1-7 + correções da revisão final). Pendente: E2E manual no Windows (`docs/e2e-m3.md`, que absorve o do M2) e CI `windows-latest` verde. Próximo: M4.
