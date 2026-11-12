@@ -57,7 +57,7 @@ vi.mock("./rtc", () => {
     constructor() {
       this.opened.catch(() => {});
     }
-    static create() {
+    static create(_ice?: unknown, _send?: unknown, _role?: unknown) {
       if (h.createFails) throw new Error("RTCPeerConnection indisponível");
       const l = new FakeLink();
       h.links.push(l);

@@ -104,7 +104,7 @@ export async function startHostNet(
   const addPeer = (s: SignalingClient, id: number) => {
     const old = peers.get(id);
     if (old) drop(id, old);
-    const link = PeerLink.create(cfg.ice_servers, (data) => s.send({ type: "signal", to: id, data }));
+    const link = PeerLink.create(cfg.ice_servers, (data) => s.send({ type: "signal", to: id, data }), "host");
     const p: Peer = { link, opened: false };
     peers.set(id, p);
     forwardRecv(
@@ -194,7 +194,7 @@ export async function startGuestNet(cfg: NetConfig, code: string): Promise<NetSe
     const hostId = await waitFor(s, (m) => (m.type === "joined" ? m.host_id : undefined));
     let l: PeerLink;
     try {
-      l = PeerLink.create(cfg.ice_servers, (data) => s.send({ type: "signal", to: hostId, data }));
+      l = PeerLink.create(cfg.ice_servers, (data) => s.send({ type: "signal", to: hostId, data }), "guest");
     } catch {
       throw new Error("Não foi possível iniciar a conexão com o Host");
     }

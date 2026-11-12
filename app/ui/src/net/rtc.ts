@@ -1,5 +1,6 @@
 import { CHANNELS, isChannelName, type ChannelName } from "./channels";
 import { IceQueue, once } from "./guards";
+import { acceptSdp, type Role } from "./sdp";
 
 type Sig =
   | { kind: "sdp"; sdp: RTCSessionDescriptionInit }
@@ -47,6 +48,7 @@ export class PeerLink {
   private constructor(
     private readonly pc: RTCPeerConnection,
     private readonly sendSignal: (data: unknown) => void,
+    private readonly role: Role,
   ) {
     this.ice = new IceQueue((c) => pc.addIceCandidate(c));
     let openCount = 0;
@@ -85,8 +87,12 @@ export class PeerLink {
     };
   }
 
-  static create(iceServers: RTCIceServer[], sendSignal: (data: unknown) => void): PeerLink {
-    return new PeerLink(new RTCPeerConnection({ iceServers }), sendSignal);
+  static create(
+    iceServers: RTCIceServer[],
+    sendSignal: (data: unknown) => void,
+    role: Role,
+  ): PeerLink {
+    return new PeerLink(new RTCPeerConnection({ iceServers }), sendSignal, role);
   }
 
   async makeOffer(): Promise<void> {
@@ -104,6 +110,7 @@ export class PeerLink {
         await this.ice.add(sig.candidate);
         return;
       }
+      if (!acceptSdp(this.role, sig.sdp)) return; // papel errado, mídia indevida ou grande demais
       await this.pc.setRemoteDescription(sig.sdp);
       if (sig.sdp.type === "offer") {
         const answer = await this.pc.createAnswer();
