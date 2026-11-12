@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Animal, InputFrame, PlayerId, RosterEntry, Snapshot};
+use crate::types::{Animal, Emote, InputFrame, PlayerId, RosterEntry, Snapshot};
 
 /// Mensagens Convidado → Host.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -12,6 +12,10 @@ pub enum GuestMsg {
         rejoin_token: u64,
     },
     Input(InputFrame),
+    Chat {
+        text: String,
+    },
+    Emote(Emote),
 }
 
 /// Mensagens Host → Convidado.
@@ -29,6 +33,14 @@ pub enum HostMsg {
     Roster(Vec<RosterEntry>),
     Snapshot(Snapshot),
     Reject(RejectReason),
+    Chat {
+        from: PlayerId,
+        text: String,
+    },
+    Emote {
+        from: PlayerId,
+        emote: Emote,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]

@@ -3,6 +3,9 @@
 /// Máximo de caracteres (chars, não bytes) em um nome de jogador.
 pub const MAX_NAME_CHARS: usize = 16;
 
+/// Máximo de caracteres (chars, não bytes) em uma mensagem de chat.
+pub const MAX_CHAT_CHARS: usize = 120;
+
 /// Caracteres invisíveis ou de controle bidirecional que não podem aparecer em nomes.
 fn is_invisible(c: char) -> bool {
     matches!(
@@ -16,20 +19,38 @@ fn is_invisible(c: char) -> bool {
     )
 }
 
-/// Limpa um nome não confiável: remove controles, invisíveis e marcas bidi, junta espaços
-/// repetidos, apara e corta em `MAX_NAME_CHARS`. Se sobrar vazio, devolve `fallback`.
-pub fn sanitize_name(raw: &str, fallback: &str) -> String {
+/// Remove controles, invisíveis e marcas bidi, junta espaços repetidos e apara.
+fn clean_text(raw: &str) -> String {
     let cleaned: String = raw
         .chars()
         .filter(|c| !c.is_control() && !is_invisible(*c))
         .collect();
-    let joined = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Limpa um nome não confiável: remove controles, invisíveis e marcas bidi, junta espaços
+/// repetidos, apara e corta em `MAX_NAME_CHARS`. Se sobrar vazio, devolve `fallback`.
+pub fn sanitize_name(raw: &str, fallback: &str) -> String {
+    let joined = clean_text(raw);
     let cut: String = joined.chars().take(MAX_NAME_CHARS).collect();
     let cut = cut.trim_end();
     if cut.is_empty() {
         fallback.to_string()
     } else {
         cut.to_string()
+    }
+}
+
+/// Limpa uma mensagem de chat não confiável com as mesmas regras de `sanitize_name`, cortando
+/// em `MAX_CHAT_CHARS`. Se sobrar vazio, devolve `None`.
+pub fn sanitize_chat(raw: &str) -> Option<String> {
+    let joined = clean_text(raw);
+    let cut: String = joined.chars().take(MAX_CHAT_CHARS).collect();
+    let cut = cut.trim_end();
+    if cut.is_empty() {
+        None
+    } else {
+        Some(cut.to_string())
     }
 }
 
@@ -55,5 +76,19 @@ mod tests {
         assert_eq!(sanitize_name(invisible, "Convidado"), "Convidado");
         assert_eq!(sanitize_name("Ana\u{202E}Maria", "x"), "AnaMaria");
         assert_eq!(sanitize_name(" \u{200B} Tamy \u{FEFF}", "x"), "Tamy");
+    }
+
+    #[test]
+    fn sanitize_chat_rules() {
+        assert_eq!(sanitize_chat("  oi  "), Some("oi".to_string()));
+        assert_eq!(sanitize_chat("a\u{0}b\nc"), Some("abc".to_string()));
+        let long = sanitize_chat(&"x".repeat(10_000)).unwrap();
+        assert_eq!(long.chars().count(), MAX_CHAT_CHARS);
+        let multi = sanitize_chat(&"ç".repeat(500)).unwrap();
+        assert_eq!(multi.chars().count(), 120);
+        assert!(multi.chars().all(|c| c == 'ç'));
+        assert_eq!(sanitize_chat("\u{200B}\u{202E}"), None);
+        assert_eq!(sanitize_chat("   "), None);
+        assert_eq!(sanitize_chat("oi   gente"), Some("oi gente".to_string()));
     }
 }

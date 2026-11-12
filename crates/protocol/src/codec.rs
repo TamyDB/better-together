@@ -193,4 +193,63 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn wire_order_unchanged() {
+        let snap = Snapshot {
+            tick: 0,
+            pets: vec![],
+        };
+        let guest_tag = |m: GuestMsg| encode(&m)[0];
+        let host_tag = |m: HostMsg| encode(&m)[0];
+        let hello = GuestMsg::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            name: String::new(),
+            desired_animal: Animal::Duck,
+            rejoin_token: 0,
+        };
+        assert_eq!(guest_tag(hello), 0);
+        assert_eq!(
+            guest_tag(GuestMsg::Input(InputFrame {
+                seq: 0,
+                move_x: 0,
+                move_y: 0,
+                run: false,
+            })),
+            1
+        );
+        let welcome = HostMsg::Welcome {
+            player_id: PlayerId(0),
+            animal: Animal::Duck,
+            snapshot: snap.clone(),
+            aspect: 1.0,
+        };
+        assert_eq!(host_tag(welcome), 0);
+        assert_eq!(host_tag(HostMsg::Lobby { taken: vec![] }), 1);
+        assert_eq!(host_tag(HostMsg::Roster(vec![])), 2);
+        assert_eq!(host_tag(HostMsg::Snapshot(snap)), 3);
+        assert_eq!(host_tag(HostMsg::Reject(RejectReason::RoomFull)), 4);
+    }
+
+    #[test]
+    fn roundtrip_chat_and_emote() {
+        let guest_chat = GuestMsg::Chat {
+            text: "olá, patinho! 🦆 こんにちは".into(),
+        };
+        assert_eq!(decode::<GuestMsg>(&encode(&guest_chat)), Ok(guest_chat));
+        let host_chat = HostMsg::Chat {
+            from: PlayerId(2),
+            text: "ação ✨".into(),
+        };
+        assert_eq!(decode::<HostMsg>(&encode(&host_chat)), Ok(host_chat));
+        for emote in Emote::ALL {
+            let g = GuestMsg::Emote(emote);
+            assert_eq!(decode::<GuestMsg>(&encode(&g)), Ok(g));
+            let h = HostMsg::Emote {
+                from: PlayerId(3),
+                emote,
+            };
+            assert_eq!(decode::<HostMsg>(&encode(&h)), Ok(h));
+        }
+    }
 }

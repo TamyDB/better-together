@@ -7,9 +7,10 @@ mod types;
 
 pub use codec::{check_version, decode, encode, ProtocolError};
 pub use messages::{GuestMsg, HostMsg, RejectReason};
-pub use names::{sanitize_name, MAX_NAME_CHARS};
+pub use names::{sanitize_chat, sanitize_name, MAX_CHAT_CHARS, MAX_NAME_CHARS};
 pub use types::{
-    AnimState, Animal, Channel, Facing, InputFrame, PetState, PlayerId, RosterEntry, Snapshot, Vec2,
+    AnimState, Animal, Channel, Emote, Facing, InputFrame, PetState, PlayerId, RosterEntry,
+    Snapshot, Vec2,
 };
 
 /// Versão do protocolo de rede. Incrementar a cada mudança incompatível.
