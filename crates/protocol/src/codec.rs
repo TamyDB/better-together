@@ -229,6 +229,27 @@ mod tests {
         assert_eq!(host_tag(HostMsg::Roster(vec![])), 2);
         assert_eq!(host_tag(HostMsg::Snapshot(snap)), 3);
         assert_eq!(host_tag(HostMsg::Reject(RejectReason::RoomFull)), 4);
+        assert_eq!(
+            guest_tag(GuestMsg::Chat {
+                text: String::new()
+            }),
+            2
+        );
+        assert_eq!(guest_tag(GuestMsg::Emote(Emote::ALL[0])), 3);
+        let chat = HostMsg::Chat {
+            from: PlayerId(0),
+            text: String::new(),
+        };
+        assert_eq!(host_tag(chat), 5);
+        let emote = |e| HostMsg::Emote {
+            from: PlayerId(0),
+            emote: e,
+        };
+        assert_eq!(host_tag(emote(Emote::ALL[0])), 6);
+        // Cada emote vai como índice (na ordem de ALL) logo após a tag.
+        for (i, e) in Emote::ALL.into_iter().enumerate() {
+            assert_eq!(encode(&GuestMsg::Emote(e)), vec![3, i as u8]);
+        }
     }
 
     #[test]
