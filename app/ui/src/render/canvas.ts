@@ -1,7 +1,7 @@
 import type { RosterEntry, Snapshot } from "../types";
 import { backingSize, petAnchor } from "./coords";
 import { EMOTE_ICON, type Emote } from "../social";
-import { BubbleBoard, wrapText } from "./bubbles";
+import { BubbleBoard } from "./bubbles";
 import { drawPet, PET_SIZE } from "./placeholder";
 
 export interface Renderer {
@@ -83,8 +83,10 @@ const LINE_H = 16;
 function drawBubbles(
   ctx: CanvasRenderingContext2D,
   at: { x: number; y: number },
-  b: { chat?: string; emote?: Emote },
+  b: { chatLines?: string[]; emote?: Emote },
 ): void {
+  const lines = b.chatLines;
+  if (!b.emote && !lines?.length) return;
   // O nome ocupa de at.y - PET_SIZE - 20 até ~14px acima.
   let top = at.y - PET_SIZE - 38;
   ctx.save();
@@ -95,8 +97,7 @@ function drawBubbles(
     ctx.fillText(EMOTE_ICON[b.emote], at.x, top);
     top -= 38;
   }
-  if (b.chat) {
-    const lines = wrapText(b.chat, 28, 3);
+  if (lines?.length) {
     ctx.font = "13px system-ui, sans-serif";
     const w = Math.max(...lines.map((l) => ctx.measureText(l).width)) + 16;
     const h = lines.length * LINE_H + 10;
