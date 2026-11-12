@@ -55,3 +55,16 @@ li .pet { width: 24px; height: 24px; font-size: 12px; border-width: 2px; }
   color: #9aa6bf; background: rgba(22, 26, 36, 0.6); pointer-events: none;
 }
 .video-status[hidden] { display: none; }
+
+/* Chat e emotes */
+.chat-box { display: flex; flex-direction: column; gap: 4px; }
+.chat-log { display: flex; flex-direction: column; gap: 2px; font-size: 13px; overflow-wrap: anywhere; }
+.chat-input { width: 100%; box-sizing: border-box; }
+.emote-bar { display: flex; gap: 4px; }
+.emote-bar .emote { padding: 4px 8px; font-size: 16px; }
+.viewer-chat {
+  position: absolute; left: 8px; bottom: 8px; z-index: 1; width: 320px; max-width: 40%;
+  text-shadow: 0 1px 2px #000; color: #fff;
+}
+.viewer-chat .chat-input { background: rgba(22, 26, 36, 0.75); }
+.stage > .emote-bar { position: absolute; left: 340px; bottom: 8px; z-index: 1; }

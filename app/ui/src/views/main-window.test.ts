@@ -18,7 +18,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 vi.mock("../net/bridge", () => ({ startGuestNet: h.startGuestNet, startHostNet: h.startHostNet }));
 vi.mock("../render/canvas", () => ({
-  startRenderer: () => ({ update() {}, setRoster() {}, stop() {} }),
+  startRenderer: () => ({ update() {}, setRoster() {}, showChat() {}, showEmote() {}, stop() {} }),
 }));
 
 import { GUEST_PAUSED_TEXT, GUEST_WAITING_TEXT, STALL_MS } from "../net/video";
@@ -40,7 +40,8 @@ class FakeEl {
   autoplay = false;
   playsInline = false;
   attrs = new Map<string, string>();
-  listeners = new Map<string, Set<() => void>>();
+  listeners = new Map<string, Set<(e?: unknown) => void>>();
+  title = "";
   clientWidth = 0;
   clientHeight = 0;
   style = { cssText: "" };
@@ -63,17 +64,30 @@ class FakeEl {
   setAttribute(name: string, value: string) {
     this.attrs.set(name, value);
   }
-  addEventListener(name: string, cb: () => void) {
+  addEventListener(name: string, cb: (e?: unknown) => void) {
     if (!this.listeners.has(name)) this.listeners.set(name, new Set());
     this.listeners.get(name)!.add(cb);
   }
-  removeEventListener(name: string, cb: () => void) {
+  removeEventListener(name: string, cb: (e?: unknown) => void) {
     this.listeners.get(name)?.delete(cb);
   }
-  fire(name: string) {
-    for (const cb of this.listeners.get(name) ?? []) cb();
+  fire(name: string, ev?: unknown) {
+    for (const cb of this.listeners.get(name) ?? []) cb(ev);
+  }
+  focus() {
+    doc.activeElement = this;
+  }
+  blur() {
+    if (doc.activeElement === this) doc.activeElement = null;
   }
 }
+/** `document` falso; `activeElement` acompanha `focus()`/`blur()` dos elementos. */
+const doc = { activeElement: null as FakeEl | null };
+/** Listeners do `window` falso, para disparar teclado e blur nos testes. */
+const win = new Map<string, Set<(e?: unknown) => void>>();
+const fireWin = (name: string, ev?: unknown) => {
+  for (const cb of [...(win.get(name) ?? [])]) cb(ev);
+};
 
 /** Track falsa de captura (Host) ou recebida (convidado). */
 function fakeTrack() {
@@ -185,7 +199,12 @@ beforeEach(() => {
   );
   reload = vi.fn();
   const body = new FakeEl("body");
+  doc.activeElement = null;
+  win.clear();
   vi.stubGlobal("document", {
+    get activeElement() {
+      return doc.activeElement;
+    },
     body: {
       appendChild: (e: FakeEl) => {
         app = e;
@@ -195,7 +214,13 @@ beforeEach(() => {
     createElement: (tag: string) => new FakeEl(tag),
     getElementById: () => app,
   });
-  vi.stubGlobal("window", { addEventListener() {}, removeEventListener() {} });
+  vi.stubGlobal("window", {
+    addEventListener: (n: string, cb: (e?: unknown) => void) => {
+      if (!win.has(n)) win.set(n, new Set());
+      win.get(n)!.add(cb);
+    },
+    removeEventListener: (n: string, cb: (e?: unknown) => void) => win.get(n)?.delete(cb),
+  });
   vi.stubGlobal("location", { reload });
 });
 
@@ -733,5 +758,119 @@ describe("vídeo no viewer do convidado", () => {
     emit("session://host-lost");
     expect(v.srcObject).toBeNull();
     expect(t.listenerCount()).toBe(0);
+  });
+});
+
+describe("chat e emotes", () => {
+  async function inViewer(): Promise<void> {
+    h.startGuestNet.mockResolvedValue({ stop: h.stop });
+    await launch();
+    const code = codeInput();
+    code.value = "PATO-4821";
+    code.oninput?.();
+    byText("button", "Entrar")!.onclick?.();
+    await flush();
+    emit("session://welcome", { animal: "duck", aspect: 2 });
+  }
+  const chatInput = () => walk(app).find((e) => e.placeholder === "Enter para conversar")!;
+  const keyCalls = () => h.invoke.mock.calls.filter((c) => c[0] === "key_event").map((c) => c[1]);
+  const key = (code: string, k = code) => {
+    const ev = { code, key: k, target: null };
+    fireWin("keydown", ev);
+    fireWin("keyup", ev);
+  };
+  const press = (name: "keydown" | "keyup", code: string, k = code) =>
+    fireWin(name, { code, key: k, target: doc.activeElement });
+  const inputKey = (k: string) => {
+    const ev = { code: k, key: k, target: chatInput() };
+    chatInput().fire("keydown", ev);
+    fireWin("keydown", ev);
+    fireWin("keyup", ev);
+  };
+
+  it("Enter sem foco foca o campo e não é repassado", async () => {
+    await inViewer();
+    h.invoke.mockClear();
+    press("keydown", "Enter");
+    press("keyup", "Enter");
+    expect(doc.activeElement).toBe(chatInput());
+    expect(keyCalls()).toEqual([]);
+  });
+
+  it("com o campo focado, w a 1 não chamam key_event", async () => {
+    await inViewer();
+    press("keydown", "Enter");
+    h.invoke.mockClear();
+    for (const c of ["KeyW", "KeyA", "Digit1"]) {
+      press("keydown", c);
+      press("keyup", c);
+    }
+    expect(keyCalls()).toEqual([]);
+  });
+
+  it("teclas pressionadas antes de focar recebem key-up", async () => {
+    await inViewer();
+    press("keydown", "KeyW");
+    h.invoke.mockClear();
+    press("keydown", "Enter");
+    expect(keyCalls()).toEqual([{ code: "KeyW", down: false }]);
+  });
+
+  it("Enter no campo envia o texto, limpa e devolve o foco", async () => {
+    await inViewer();
+    press("keydown", "Enter");
+    chatInput().value = "  oi pessoal ";
+    inputKey("Enter");
+    expect(h.invoke).toHaveBeenCalledWith("chat_send", { text: "oi pessoal" });
+    expect(chatInput().value).toBe("");
+    expect(doc.activeElement).toBeNull();
+    expect(keyCalls()).toEqual([]);
+  });
+
+  it("Esc limpa sem enviar", async () => {
+    await inViewer();
+    press("keydown", "Enter");
+    chatInput().value = "rascunho";
+    inputKey("Escape");
+    expect(h.invoke.mock.calls.some((c) => c[0] === "chat_send")).toBe(false);
+    expect(chatInput().value).toBe("");
+    expect(doc.activeElement).toBeNull();
+  });
+
+  it("clique num emote chama emote_send", async () => {
+    await inViewer();
+    const heart = walk(app).find((e) => e.tag === "button" && e.textContent === "❤️")!;
+    heart.onclick?.();
+    expect(h.invoke).toHaveBeenCalledWith("emote_send", { emote: "heart" });
+  });
+
+  it("chat válido aparece com o nome; payload malformado é ignorado", async () => {
+    await inViewer();
+    emit("session://roster", [{ id: 1, name: "Ana", animal: "duck", asleep: false }]);
+    emit("session://chat", { from: 1, text: "olá" });
+    emit("session://chat", { from: "1", text: "ruim" });
+    emit("session://chat", { from: 1, text: 42 });
+    emit("session://chat", null);
+    emit("session://emote", { from: 1, emote: "xx" });
+    const texts = walk(app).map((e) => e.textContent);
+    expect(texts).toContain("Ana: olá");
+    expect(texts.some((t) => t.includes("ruim"))).toBe(false);
+  });
+
+  it("autor sem roster vira Jogador", async () => {
+    await inViewer();
+    emit("session://chat", { from: 7, text: "oi" });
+    expect(walk(app).map((e) => e.textContent)).toContain("Jogador: oi");
+  });
+
+  it("Host: painel tem campo, 6 emotes e envia chat", async () => {
+    await clickCreate();
+    await flush();
+    expect(walk(app).filter((e) => e.className === "secondary emote")).toHaveLength(6);
+    chatInput().value = "bom dia";
+    inputKey("Enter");
+    expect(h.invoke).toHaveBeenCalledWith("chat_send", { text: "bom dia" });
+    emit("session://chat", { from: 0, text: "eco" });
+    expect(walk(app).map((e) => e.textContent)).toContain("Jogador: eco");
   });
 });

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { listenSocial } from "./chat";
 import { startRenderer } from "../render/canvas";
 import type { RosterEntry, Snapshot } from "../types";
 
@@ -9,6 +10,11 @@ export function startOverlay(): void {
   const renderer = startRenderer(canvas);
 
   void listen<Snapshot>("sim://snapshot", (e) => renderer.update(e.payload));
+  // Só balões: a overlay não tem caixa de histórico.
+  void listenSocial({
+    chat: (m) => renderer.showChat(m.from, m.text),
+    emote: (m) => renderer.showEmote(m.from, m.emote),
+  });
   // O listen vem antes do invoke; o evento (mais novo) nunca é sobrescrito pela resposta.
   let gotRosterEvent = false;
   void listen<RosterEntry[]>("session://roster", (e) => {
