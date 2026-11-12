@@ -18,8 +18,9 @@ export interface NetSession {
 
 export interface HostNetSession extends NetSession {
   /**
-   * Troca a track enviada a todos os convidados (`null` pausa) e vale para quem entrar depois.
-   * No-op depois de `stop()`. A ponte nunca para tracks: o dono é quem capturou.
+   * Troca a track enviada (`null` pausa) a quem o Rust liberou por `net://video` e vale para
+   * quem for liberado depois. No-op depois de `stop()`. A ponte nunca para tracks: o dono é
+   * quem capturou.
    */
   setVideo(track: MediaStreamTrack | null): void;
 }
@@ -31,6 +32,12 @@ interface SendPayload {
   peer: number;
   channel: string;
   bytes: number[];
+}
+
+/** O Rust liga (`on`) ou corta o vídeo de um peer; quem decide a admissão é ele. */
+interface VideoPayload {
+  peer: number;
+  on: boolean;
 }
 
 /** Liga mensagens de um PeerLink ao Rust, descartando as grandes demais e as que `allow` recusar. */
@@ -87,11 +94,13 @@ export async function startHostNet(
   interface Peer {
     link: PeerLink;
     opened: boolean;
+    /** Liberado pelo Rust (`net://video`): só então recebe a tela. */
+    video: boolean;
   }
   const peers = new Map<number, Peer>();
   const limiter = new ChannelLimiter(() => performance.now());
   let sig: SignalingClient | null = null;
-  let unlisten: (() => void) | null = null;
+  const unlisten: (() => void)[] = [];
 
   // Limpa o peer; `net_peer_closed` só se `net_peer_opened` foi invocado (e só uma vez).
   const drop = (id: number, p: Peer) => {
@@ -105,7 +114,7 @@ export async function startHostNet(
   const stop = async () => {
     if (stopped) return;
     stopped = true;
-    unlisten?.();
+    unlisten.forEach((u) => u());
     for (const p of peers.values()) p.link.close();
     peers.clear();
     sig?.close();
@@ -115,9 +124,9 @@ export async function startHostNet(
     const old = peers.get(id);
     if (old) drop(id, old);
     const link = PeerLink.create(cfg.ice_servers, (data) => s.send({ type: "signal", to: id, data }), "host");
-    const p: Peer = { link, opened: false };
+    // O transceiver nasce sem track: a tela só vai depois do `net://video` do Rust.
+    const p: Peer = { link, opened: false, video: false };
     peers.set(id, p);
-    void link.setVideo(currentVideo);
     forwardRecv(
       link,
       id,
@@ -136,12 +145,22 @@ export async function startHostNet(
   };
 
   try {
-    // O listener vem antes da conexão: nenhum `net://send` se perde nem corre contra o `stop`.
-    unlisten = await listen<SendPayload>("net://send", (e) => {
-      const { peer, channel, bytes } = e.payload;
-      if (!isChannelName(channel)) return;
-      peers.get(peer)?.link.send(channel, Uint8Array.from(bytes));
-    });
+    // Os listeners vêm antes da conexão: nenhum evento se perde nem corre contra o `stop`.
+    unlisten.push(
+      await listen<SendPayload>("net://send", (e) => {
+        const { peer, channel, bytes } = e.payload;
+        if (!isChannelName(channel)) return;
+        peers.get(peer)?.link.send(channel, Uint8Array.from(bytes));
+      }),
+      await listen<VideoPayload>("net://video", (e) => {
+        if (stopped) return;
+        const { peer, on } = e.payload;
+        const p = peers.get(peer);
+        if (!p) return;
+        p.video = on === true;
+        void p.link.setVideo(p.video ? currentVideo : null);
+      }),
+    );
     const s = await connectSignaling(cfg.signaling_url, () => stopped);
     sig = s;
     s.send({ type: "create_room" });
@@ -170,7 +189,7 @@ export async function startHostNet(
   const setVideo = (track: MediaStreamTrack | null) => {
     if (stopped) return;
     currentVideo = track;
-    for (const p of peers.values()) void p.link.setVideo(track);
+    for (const p of peers.values()) if (p.video) void p.link.setVideo(track);
   };
   return { stop, setVideo };
 }

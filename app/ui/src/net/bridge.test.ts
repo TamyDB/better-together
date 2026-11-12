@@ -6,10 +6,19 @@ const h = vi.hoisted(() => ({
   sig: null as any,
   links: [] as any[],
   createFails: false,
+  listeners: new Map<string, (e: { payload: unknown }) => void>(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: h.invoke }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => h.unlisten) }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (name: string, cb: (e: { payload: unknown }) => void) => {
+    h.listeners.set(name, cb);
+    return () => {
+      h.unlisten(name);
+      if (h.listeners.get(name) === cb) h.listeners.delete(name);
+    };
+  }),
+}));
 vi.mock("./signaling", async (orig) => {
   const real = await orig<typeof import("./signaling")>();
   class FakeSig {
@@ -106,6 +115,7 @@ beforeEach(() => {
   h.unlisten.mockClear();
   h.links.length = 0;
   h.createFails = false;
+  h.listeners.clear();
 });
 
 afterEach(() => {
@@ -275,51 +285,94 @@ describe("Host (vídeo)", () => {
     h.sig.emit({ type: "room_created", code: "PATO-4821", peer_id: 1 });
     return { session: await p, sig: h.sig };
   }
+  /** O Rust liga (ou corta) o vídeo de um peer: só ele decide quem foi admitido. */
+  const video = (peer: number, on: boolean) => h.listeners.get("net://video")?.({ payload: { peer, on } });
 
-  it("a track atual vale para peers vivos e novos; quem saiu não recebe mais", async () => {
+  it("peer conectado sem net://video não recebe track", async () => {
+    const { session, sig } = await hostWith(trackA);
+    sig.emit({ type: "peer_joined", peer_id: 5 });
+    const link = h.links[0];
+    link.resolve();
+    await flush();
+    session.setVideo(trackB);
+    session.setVideo(null);
+    expect(link.videoCalls).toEqual([]);
+  });
+
+  it("net://video on aplica a track atual e as trocas seguintes", async () => {
     const { session, sig } = await hostWith(trackA);
     sig.emit({ type: "peer_joined", peer_id: 5 });
     sig.emit({ type: "peer_joined", peer_id: 6 });
     const [l5, l6] = h.links;
+    video(5, true);
     expect(l5.videoCalls).toEqual([trackA]);
-    expect(l6.videoCalls).toEqual([trackA]);
-
     session.setVideo(trackB);
     expect(l5.videoCalls).toEqual([trackA, trackB]);
-    expect(l6.videoCalls).toEqual([trackA, trackB]);
-
-    sig.emit({ type: "peer_joined", peer_id: 7 });
-    expect(h.links[2].videoCalls).toEqual([trackB]);
-
-    sig.emit({ type: "peer_left", peer_id: 5 });
     session.setVideo(null);
-    expect(l5.videoCalls).toEqual([trackA, trackB]);
-    expect(l6.videoCalls).toEqual([trackA, trackB, null]);
-    expect(h.links[2].videoCalls).toEqual([trackB, null]);
+    expect(l5.videoCalls).toEqual([trackA, trackB, null]);
+    // O 6 nunca foi admitido.
+    expect(l6.videoCalls).toEqual([]);
+  });
+
+  it("net://video on sem track atual aplica null", async () => {
+    const { sig } = await hostWith(null);
+    sig.emit({ type: "peer_joined", peer_id: 5 });
+    video(5, true);
+    expect(h.links[0].videoCalls).toEqual([null]);
+  });
+
+  it("net://video off aplica null e o peer para de receber", async () => {
+    const { session, sig } = await hostWith(trackA);
+    sig.emit({ type: "peer_joined", peer_id: 5 });
+    const link = h.links[0];
+    video(5, true);
+    video(5, false);
+    expect(link.videoCalls).toEqual([trackA, null]);
+    session.setVideo(trackB);
+    expect(link.videoCalls).toEqual([trackA, null]);
+  });
+
+  it("net://video para peer inexistente é ignorado", async () => {
+    const { session, sig } = await hostWith(trackA);
+    video(9, true);
+    sig.emit({ type: "peer_joined", peer_id: 9 });
+    session.setVideo(trackB);
+    expect(h.links[0].videoCalls).toEqual([]);
+  });
+
+  it("peer que sai e volta com o mesmo id nasce sem vídeo", async () => {
+    const { session, sig } = await hostWith(trackA);
+    sig.emit({ type: "peer_joined", peer_id: 5 });
+    video(5, true);
+    sig.emit({ type: "peer_left", peer_id: 5 });
+    sig.emit({ type: "peer_joined", peer_id: 5 });
+    session.setVideo(trackB);
+    expect(h.links[0].videoCalls).toEqual([trackA]);
+    expect(h.links[1].videoCalls).toEqual([]);
   });
 
   it("peer que fecha sozinho não recebe mais setVideo", async () => {
     const { session, sig } = await hostWith(trackA);
     sig.emit({ type: "peer_joined", peer_id: 5 });
     const link = h.links[0];
+    video(5, true);
     link.fireClose();
     session.setVideo(trackB);
     expect(link.videoCalls).toEqual([trackA]);
   });
 
-  it("sem track inicial, o peer novo recebe null", async () => {
-    const { sig } = await hostWith(null);
-    sig.emit({ type: "peer_joined", peer_id: 5 });
-    expect(h.links[0].videoCalls).toEqual([null]);
-  });
-
-  it("depois de stop(), setVideo não chega a ninguém", async () => {
+  it("depois de stop(), setVideo e net://video não chegam a ninguém", async () => {
     const { session, sig } = await hostWith(trackA);
     sig.emit({ type: "peer_joined", peer_id: 5 });
     const link = h.links[0];
+    const handler = h.listeners.get("net://video");
+    video(5, true);
     await session.stop();
+    expect(h.unlisten).toHaveBeenCalledWith("net://video");
     session.setVideo(trackB);
     session.setVideo(null);
+    handler?.({ payload: { peer: 5, on: true } });
+    handler?.({ payload: { peer: 5, on: false } });
     expect(link.videoCalls).toEqual([trackA]);
   });
 
@@ -328,7 +381,9 @@ describe("Host (vídeo)", () => {
     const a = { kind: "video", stop: stopA } as unknown as MediaStreamTrack;
     const { session, sig } = await hostWith(a);
     sig.emit({ type: "peer_joined", peer_id: 5 });
+    video(5, true);
     session.setVideo(trackB);
+    video(5, false);
     sig.emit({ type: "peer_left", peer_id: 5 });
     await session.stop();
     expect(stopA).not.toHaveBeenCalled();

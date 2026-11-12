@@ -224,6 +224,13 @@ mod tests {
         let names = names(&events);
         assert!(names.contains(&"session://roster"), "{names:?}");
         assert_eq!(names.iter().filter(|n| **n == "net://send").count(), 3);
+        let events = events.borrow();
+        let video: Vec<&Value> = events
+            .iter()
+            .filter(|(n, _)| *n == "net://video")
+            .map(|(_, p)| p)
+            .collect();
+        assert_eq!(video, vec![&json!({ "peer": 7, "on": true })]);
     }
 
     #[test]

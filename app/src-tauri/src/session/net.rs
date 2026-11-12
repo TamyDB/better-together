@@ -27,4 +27,6 @@ pub enum Out {
     },
     /// Roster para a UI local do Host.
     Roster(Vec<RosterEntry>),
+    /// Liga (`on`) ou corta o vídeo do Host para o peer: só quem foi admitido vê a tela.
+    Video { peer: PeerId, on: bool },
 }
