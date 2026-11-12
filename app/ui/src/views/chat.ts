@@ -64,7 +64,8 @@ export interface ChatBox {
 
 /**
  * Caixa de chat: histórico (só `textContent`) e campo. `Enter` envia o texto aparado (vazio só
- * fecha) e `Esc` limpa; os dois chamam `onDone` para quem hospeda devolver o foco.
+ * fecha) e `Esc` limpa; os dois chamam `onDone` para quem hospeda devolver o foco. Autorepeat do
+ * `Enter` e teclas durante a composição do IME são ignorados.
  */
 export function chatBox(opts: {
   names: () => Map<number, string>;
@@ -95,7 +96,11 @@ export function chatBox(opts: {
     );
   };
   const onKey = (e: KeyboardEvent) => {
+    // Composição do IME em andamento: `Enter`/`Esc` confirmam ou cancelam a composição.
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter") {
+      // Segurar `Enter` não reenvia nem fecha o campo.
+      if (e.repeat) return;
       const text = input.value.trim();
       input.value = "";
       if (text) opts.onSend(text);
@@ -117,7 +122,8 @@ export function chatBox(opts: {
   };
 }
 
-/** Seis botões de emote, na ordem das teclas 1–6. */
+/** Seis botões de emote, na ordem das teclas 1–6. Não guardam o foco (nem por Tab nem por
+ *  clique): `Espaço`/`Enter` depois do clique não reenviam o emote. */
 export function emoteBar(onEmote: (e: Emote) => void): HTMLElement {
   const bar = document.createElement("div");
   bar.className = "emote-bar";
@@ -126,6 +132,8 @@ export function emoteBar(onEmote: (e: Emote) => void): HTMLElement {
     b.className = "secondary emote";
     b.textContent = EMOTE_ICON[emote];
     b.title = `Tecla ${i + 1}`;
+    b.tabIndex = -1;
+    b.addEventListener("mousedown", (e) => e.preventDefault());
     b.onclick = () => onEmote(emote);
     bar.appendChild(b);
   });

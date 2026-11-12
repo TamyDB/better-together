@@ -864,6 +864,16 @@ describe("chat e emotes", () => {
     expect(walk(app).map((e) => e.textContent)).toContain("Jogador: oi");
   });
 
+  it("Enter segurado depois de enviar não reabre o campo", async () => {
+    await inViewer();
+    press("keydown", "Enter");
+    chatInput().value = "oi";
+    inputKey("Enter");
+    press("keydown", "Enter", "Enter", true);
+    expect(doc.activeElement).toBeNull();
+    expect(keyCalls()).toEqual([]);
+  });
+
   it("keyup do Enter que enviou não é repassado", async () => {
     await inViewer();
     press("keydown", "Enter");

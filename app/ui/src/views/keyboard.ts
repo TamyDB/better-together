@@ -1,7 +1,8 @@
 /**
  * Teclado do jogo numa janela do app (viewer do convidado ou painel do Host): as teclas vão para
- * `onKey`, menos enquanto o campo de chat tem o teclado. `Enter` sem foco foca o campo; focar o
- * campo (por `Enter` ou clique) e perder o foco da janela soltam o que estava pressionado.
+ * `onKey`, menos enquanto o campo de chat tem o teclado. `Enter` sem foco (sem autorepeat) foca o
+ * campo; focar o campo (por `Enter` ou clique) e perder o foco da janela soltam o que estava
+ * pressionado.
  * Devolve o `dispose`, que para de escutar e solta as teclas.
  */
 export function bindGameKeys(opts: {
@@ -19,6 +20,8 @@ export function bindGameKeys(opts: {
   const onDown = (e: KeyboardEvent) => {
     if (typing(e)) return;
     if (e.key === "Enter") {
+      // Enter segurado depois de enviar não reabre o campo.
+      if (e.repeat) return;
       // Solta o que estava pressionado antes de o campo ficar com o teclado.
       release();
       input.focus();

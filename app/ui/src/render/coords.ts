@@ -16,3 +16,10 @@ export function petAnchor(pos: Vec2, cssW: number, cssH: number, size: number): 
   const p = toPixels(pos, cssW - size, cssH - size);
   return { x: p.x + size / 2, y: p.y + size };
 }
+
+/** Centro `x` de algo com largura `w` para caber inteiro em `[0, cssW]`; mais largo que a área,
+ *  fica centralizado. */
+export function clampCenter(x: number, w: number, cssW: number): number {
+  if (w >= cssW) return cssW / 2;
+  return Math.min(Math.max(x, w / 2), cssW - w / 2);
+}

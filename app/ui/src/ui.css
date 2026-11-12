@@ -59,6 +59,8 @@ li .pet { width: 24px; height: 24px; font-size: 12px; border-width: 2px; }
 /* Chat e emotes */
 .chat-box { display: flex; flex-direction: column; gap: 4px; }
 .chat-log { display: flex; flex-direction: column; gap: 2px; font-size: 13px; overflow-wrap: anywhere; }
+/* Marcas combinantes empilhadas (zalgo) não vazam da própria linha. */
+.chat-log > div { overflow: hidden; }
 .chat-input { width: 100%; box-sizing: border-box; }
 .emote-bar { display: flex; gap: 4px; }
 .emote-bar .emote { padding: 4px 8px; font-size: 16px; }

@@ -1,5 +1,5 @@
 import type { RosterEntry, Snapshot } from "../types";
-import { backingSize, petAnchor } from "./coords";
+import { backingSize, clampCenter, petAnchor } from "./coords";
 import { EMOTE_ICON, type Emote } from "../social";
 import { BubbleBoard } from "./bubbles";
 import { drawPet, PET_SIZE } from "./placeholder";
@@ -58,7 +58,7 @@ export function startRenderer(canvas: HTMLCanvasElement, opts: RendererOpts = {}
       const at = petAnchor(pet.pos, area.w, area.h, PET_SIZE);
       const p = { x: area.x + at.x, y: area.y + at.y };
       drawPet(ctx, pet, p, names.get(pet.id));
-      drawBubbles(ctx, p, bubbles.active(pet.id));
+      drawBubbles(ctx, p, bubbles.active(pet.id), cssW);
     }
     requestAnimationFrame(frame);
   };
@@ -77,31 +77,38 @@ export function startRenderer(canvas: HTMLCanvasElement, opts: RendererOpts = {}
 }
 
 const LINE_H = 16;
+const EMOTE_H = 38;
 
-/** Emote logo acima do nome e balão de chat acima dele. Só `fillText`: texto de outros
- *  jogadores nunca é interpretado como markup. */
+/** Emote logo acima do nome e balão de chat acima dele, a pilha inteira dentro do canvas
+ *  (`cssW` de largura). Só `fillText`: texto de outros jogadores nunca é interpretado como
+ *  markup; o texto do balão é recortado no balão (marcas combinantes empilhadas não vazam). */
 function drawBubbles(
   ctx: CanvasRenderingContext2D,
   at: { x: number; y: number },
   b: { chatLines?: string[]; emote?: Emote },
+  cssW: number,
 ): void {
   const lines = b.chatLines;
   if (!b.emote && !lines?.length) return;
-  // O nome ocupa de at.y - PET_SIZE - 20 até ~14px acima.
-  let top = at.y - PET_SIZE - 38;
   ctx.save();
+  const chatFont = "13px system-ui, sans-serif";
+  ctx.font = chatFont;
+  const w = lines?.length ? Math.max(...lines.map((l) => ctx.measureText(l).width)) + 16 : 0;
+  const h = lines?.length ? lines.length * LINE_H + 10 : 0;
+  // O nome ocupa de at.y - PET_SIZE - 20 até ~14px acima. Perto do topo, a pilha desce inteira.
+  let top = Math.max(at.y - PET_SIZE - 38, (b.emote ? EMOTE_H : 0) + h);
   if (b.emote) {
+    const icon = EMOTE_ICON[b.emote];
     ctx.font = "32px system-ui, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "bottom";
-    ctx.fillText(EMOTE_ICON[b.emote], at.x, top);
-    top -= 38;
+    ctx.fillText(icon, clampCenter(at.x, ctx.measureText(icon).width, cssW), top);
+    top -= EMOTE_H;
   }
   if (lines?.length) {
-    ctx.font = "13px system-ui, sans-serif";
-    const w = Math.max(...lines.map((l) => ctx.measureText(l).width)) + 16;
-    const h = lines.length * LINE_H + 10;
-    const x = at.x - w / 2;
+    ctx.font = chatFont;
+    const cx = clampCenter(at.x, w, cssW);
+    const x = cx - w / 2;
     const y = top - h;
     ctx.beginPath();
     ctx.roundRect(x, y, w, h, 8);
@@ -110,10 +117,11 @@ function drawBubbles(
     ctx.lineWidth = 2;
     ctx.strokeStyle = "#2B1B10";
     ctx.stroke();
+    ctx.clip();
     ctx.fillStyle = "#2B1B10";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    lines.forEach((l, i) => ctx.fillText(l, at.x, y + 5 + LINE_H * (i + 0.5)));
+    lines.forEach((l, i) => ctx.fillText(l, cx, y + 5 + LINE_H * (i + 0.5)));
   }
   ctx.restore();
 }

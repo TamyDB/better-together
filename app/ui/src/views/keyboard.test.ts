@@ -92,6 +92,12 @@ describe("bindGameKeys", () => {
     expect(keys).toEqual([]);
   });
 
+  it("Enter segurado (autorepeat) não foca o campo", () => {
+    press("keydown", "Enter", { repeat: true });
+    expect(doc.activeElement).toBeNull();
+    expect(keys).toEqual([]);
+  });
+
   it("keyup de Enter fora do campo é ignorado", () => {
     press("keyup", "Enter");
     expect(keys).toEqual([]);
