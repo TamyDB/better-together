@@ -16,6 +16,14 @@ export interface NetSession {
   stop(): Promise<void>;
 }
 
+export interface HostNetSession extends NetSession {
+  /**
+   * Troca a track enviada a todos os convidados (`null` pausa) e vale para quem entrar depois.
+   * No-op depois de `stop()`. A ponte nunca para tracks: o dono é quem capturou.
+   */
+  setVideo(track: MediaStreamTrack | null): void;
+}
+
 const HOST_PEER = 0;
 const HOST_CONNECT_FAILED = "Não foi possível conectar ao Host";
 
@@ -71,8 +79,10 @@ export async function startHostNet(
   cfg: NetConfig,
   onCode: (code: string) => void,
   onSignalingLost?: () => void,
-): Promise<NetSession> {
+  video: MediaStreamTrack | null = null,
+): Promise<HostNetSession> {
   let stopped = false;
+  let currentVideo = video;
   const alive = () => !stopped;
   interface Peer {
     link: PeerLink;
@@ -107,6 +117,7 @@ export async function startHostNet(
     const link = PeerLink.create(cfg.ice_servers, (data) => s.send({ type: "signal", to: id, data }), "host");
     const p: Peer = { link, opened: false };
     peers.set(id, p);
+    void link.setVideo(currentVideo);
     forwardRecv(
       link,
       id,
@@ -156,10 +167,19 @@ export async function startHostNet(
     await stop();
     throw e;
   }
-  return { stop };
+  const setVideo = (track: MediaStreamTrack | null) => {
+    if (stopped) return;
+    currentVideo = track;
+    for (const p of peers.values()) void p.link.setVideo(track);
+  };
+  return { stop, setVideo };
 }
 
-export async function startGuestNet(cfg: NetConfig, code: string): Promise<NetSession> {
+export async function startGuestNet(
+  cfg: NetConfig,
+  code: string,
+  onVideo?: (track: MediaStreamTrack) => void,
+): Promise<NetSession> {
   const norm = normalizeCode(code);
   if (!norm) throw new Error("Código inválido");
   let stopped = false;
@@ -201,6 +221,12 @@ export async function startGuestNet(cfg: NetConfig, code: string): Promise<NetSe
     link = l;
     forwardRecv(l, HOST_PEER, () => !stopped && opened);
     l.onClose(closeHost);
+    if (onVideo) {
+      // Pode chegar antes dos canais abrirem; nada sai depois do `stop()`.
+      l.onVideo((t) => {
+        if (!stopped) onVideo(t);
+      });
+    }
 
     // Falha antes de abrir (host_left, sinalização caída) também aborta a espera.
     let abort!: (e: Error) => void;

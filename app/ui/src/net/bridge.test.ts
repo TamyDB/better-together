@@ -54,6 +54,8 @@ vi.mock("./rtc", () => {
       this.reject = rej;
     });
     closed = false;
+    videoCalls: unknown[] = [];
+    videoCbs: ((t: unknown) => void)[] = [];
     constructor() {
       this.opened.catch(() => {});
     }
@@ -79,6 +81,15 @@ vi.mock("./rtc", () => {
     }
     fireClose() {
       for (const cb of this.closeCbs) cb();
+    }
+    async setVideo(t: unknown) {
+      this.videoCalls.push(t);
+    }
+    onVideo(cb: (t: unknown) => void) {
+      this.videoCbs.push(cb);
+    }
+    emitVideo(t: unknown) {
+      for (const cb of this.videoCbs) cb(t);
     }
   }
   return { PeerLink: FakeLink };
@@ -108,8 +119,8 @@ async function host() {
   return { session: await p, sig: h.sig };
 }
 
-async function guest() {
-  const p = startGuestNet(cfg, "pato4821");
+async function guest(onVideo?: (t: MediaStreamTrack) => void) {
+  const p = startGuestNet(cfg, "pato4821", onVideo);
   await flush();
   h.sig.emit({ type: "joined", code: "PATO-4821", peer_id: 2, host_id: 1 });
   await flush();
@@ -251,6 +262,93 @@ describe("Host", () => {
     await session.stop();
     h.sig.drop();
     expect(lost).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Host (vídeo)", () => {
+  const trackA = { kind: "video", id: "A" } as unknown as MediaStreamTrack;
+  const trackB = { kind: "video", id: "B" } as unknown as MediaStreamTrack;
+
+  async function hostWith(video: MediaStreamTrack | null) {
+    const p = startHostNet(cfg, () => {}, undefined, video);
+    await flush();
+    h.sig.emit({ type: "room_created", code: "PATO-4821", peer_id: 1 });
+    return { session: await p, sig: h.sig };
+  }
+
+  it("a track atual vale para peers vivos e novos; quem saiu não recebe mais", async () => {
+    const { session, sig } = await hostWith(trackA);
+    sig.emit({ type: "peer_joined", peer_id: 5 });
+    sig.emit({ type: "peer_joined", peer_id: 6 });
+    const [l5, l6] = h.links;
+    expect(l5.videoCalls).toEqual([trackA]);
+    expect(l6.videoCalls).toEqual([trackA]);
+
+    session.setVideo(trackB);
+    expect(l5.videoCalls).toEqual([trackA, trackB]);
+    expect(l6.videoCalls).toEqual([trackA, trackB]);
+
+    sig.emit({ type: "peer_joined", peer_id: 7 });
+    expect(h.links[2].videoCalls).toEqual([trackB]);
+
+    sig.emit({ type: "peer_left", peer_id: 5 });
+    session.setVideo(null);
+    expect(l5.videoCalls).toEqual([trackA, trackB]);
+    expect(l6.videoCalls).toEqual([trackA, trackB, null]);
+    expect(h.links[2].videoCalls).toEqual([trackB, null]);
+  });
+
+  it("peer que fecha sozinho não recebe mais setVideo", async () => {
+    const { session, sig } = await hostWith(trackA);
+    sig.emit({ type: "peer_joined", peer_id: 5 });
+    const link = h.links[0];
+    link.fireClose();
+    session.setVideo(trackB);
+    expect(link.videoCalls).toEqual([trackA]);
+  });
+
+  it("sem track inicial, o peer novo recebe null", async () => {
+    const { sig } = await hostWith(null);
+    sig.emit({ type: "peer_joined", peer_id: 5 });
+    expect(h.links[0].videoCalls).toEqual([null]);
+  });
+
+  it("depois de stop(), setVideo não chega a ninguém", async () => {
+    const { session, sig } = await hostWith(trackA);
+    sig.emit({ type: "peer_joined", peer_id: 5 });
+    const link = h.links[0];
+    await session.stop();
+    session.setVideo(trackB);
+    session.setVideo(null);
+    expect(link.videoCalls).toEqual([trackA]);
+  });
+
+  it("a ponte nunca para tracks", async () => {
+    const stopA = vi.fn();
+    const a = { kind: "video", stop: stopA } as unknown as MediaStreamTrack;
+    const { session, sig } = await hostWith(a);
+    sig.emit({ type: "peer_joined", peer_id: 5 });
+    session.setVideo(trackB);
+    sig.emit({ type: "peer_left", peer_id: 5 });
+    await session.stop();
+    expect(stopA).not.toHaveBeenCalled();
+  });
+});
+
+describe("Convidado (vídeo)", () => {
+  it("onVideo recebe a track do link, e nada depois do stop()", async () => {
+    const got: MediaStreamTrack[] = [];
+    const { p, link } = await guest((t) => got.push(t));
+    const t1 = { kind: "video" } as MediaStreamTrack;
+    link.emitVideo(t1); // pode chegar antes de abrir os canais
+    link.resolve();
+    const session = await p;
+    const t2 = { kind: "video" } as MediaStreamTrack;
+    link.emitVideo(t2);
+    expect(got).toEqual([t1, t2]);
+    await session.stop();
+    link.emitVideo({ kind: "video" });
+    expect(got).toEqual([t1, t2]);
   });
 });
 
