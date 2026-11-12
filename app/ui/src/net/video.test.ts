@@ -18,6 +18,7 @@ describe("CAPTURE_OPTIONS", () => {
   it("capture_options_shape", () => {
     expect(CAPTURE_OPTIONS.audio).toBe(false);
     const v = CAPTURE_OPTIONS.video as MediaTrackConstraints;
+    expect(v.displaySurface).toBe("monitor");
     expect(v.width).toEqual({ max: 1280 });
     expect(v.height).toEqual({ max: 720 });
     expect(v.frameRate).toEqual({ max: 30 });
@@ -45,6 +46,14 @@ describe("captureWarning", () => {
     );
     expect(captureWarning({}, wide)).toBeNull();
     expect(captureWarning({ width: 1280, height: 800 }, 16 / 10)).toBeNull();
+  });
+
+  it("fronteira da tolerância de proporção", () => {
+    // Desvio relativo de 1,9% passa; de 2,1% avisa.
+    expect(captureWarning({ width: 1019, height: 1000 }, 1)).toBeNull();
+    expect(captureWarning({ width: 1021, height: 1000 }, 1)).toBe(SCREEN_WARNING);
+    expect(captureWarning({ width: 981, height: 1000 }, 1)).toBeNull();
+    expect(captureWarning({ width: 979, height: 1000 }, 1)).toBe(SCREEN_WARNING);
   });
 
   it("janela vem antes da proporção", () => {

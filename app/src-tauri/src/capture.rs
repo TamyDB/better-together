@@ -12,6 +12,10 @@ pub fn exclude_hwnd(hwnd: windows::Win32::Foundation::HWND) -> windows::core::Re
 
 /// Aplica `exclude_hwnd` na janela. Devolve `false` se falhou: a sessão segue, mas os
 /// bichinhos do Host vão aparecer duplicados no vídeo.
+///
+/// `true` não garante a exclusão: antes do Windows 10 2004 a chamada "funciona" como
+/// `WDA_MONITOR` e a overlay vira um retângulo preto no vídeo, sem erro. O mínimo da spec é
+/// o 2004+; checar a versão fica para o M6 (instalador).
 #[cfg(windows)]
 pub fn exclude_from_capture(window: &tauri::WebviewWindow) -> bool {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { VideoState } from "../net/video";
 import { HostVideo } from "./host-video";
 
@@ -34,6 +34,12 @@ function setup(...results: (FakeTrack | "refuse")[]) {
 }
 
 describe("HostVideo", () => {
+  // Recusa do seletor vira `console.debug`: silenciado para não poluir a saída.
+  beforeEach(() => {
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+  });
+  afterEach(() => vi.restoreAllMocks());
+
   it("share chama capture de forma síncrona", () => {
     const { video, capture } = setup(fakeTrack());
     void video.share();
@@ -65,23 +71,28 @@ describe("HostVideo", () => {
   });
 
   it("capture rejeitando mantém none e não chama apply", async () => {
+    const debug = vi.mocked(console.debug);
     const { video, apply, states } = setup("refuse");
     await video.share();
+    expect(debug).toHaveBeenCalledWith("captura de tela recusada", expect.any(DOMException));
     expect(apply).not.toHaveBeenCalled();
     expect(states).toEqual([]);
     expect(video.settings()).toBeNull();
   });
 
   it("capture lançando de forma síncrona vira recusa", async () => {
+    const debug = vi.mocked(console.debug);
     const apply = vi.fn();
+    const error = new Error("sem mediaDevices");
     const video = new HostVideo(
       () => {
-        throw new Error("sem mediaDevices");
+        throw error;
       },
       apply,
       () => {},
     );
     await expect(video.share()).resolves.toBeUndefined();
+    expect(debug).toHaveBeenCalledWith("captura de tela indisponível", error);
     expect(apply).not.toHaveBeenCalled();
   });
 

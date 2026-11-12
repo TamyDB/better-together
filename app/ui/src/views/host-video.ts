@@ -24,12 +24,13 @@ export class HostVideo {
     let pending: Promise<MediaStream>;
     try {
       pending = this.capture();
-    } catch {
+    } catch (e) {
+      console.debug("captura de tela indisponível", e);
       return Promise.resolve();
     }
     return pending.then(
       (stream) => this.adopt(stream),
-      () => {},
+      (e) => console.debug("captura de tela recusada", e),
     );
   }
 

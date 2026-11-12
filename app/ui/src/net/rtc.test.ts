@@ -87,7 +87,10 @@ describe("PeerLink (vídeo)", () => {
   beforeEach(() => {
     pc = installFakePeerConnection();
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
 
   it("host cria 1 transceiver sendonly com VIDEO_ENCODING antes da oferta", async () => {
     await make("host").makeOffer();
@@ -124,7 +127,6 @@ describe("PeerLink (vídeo)", () => {
     pc.sender.replaceTrack.mockRejectedValueOnce(new Error("falhou"));
     await expect(make("host").setVideo(track())).resolves.toBeUndefined();
     expect(debug).toHaveBeenCalled();
-    debug.mockRestore();
   });
 
   it("trocas rápidas: a última track vence", async () => {
@@ -160,7 +162,6 @@ describe("PeerLink (vídeo)", () => {
     rejectFirst(new Error("falhou"));
     await Promise.all([first, second]);
     expect(pc.sender.replaceTrack.mock.calls.map((c) => c[0])).toEqual([a, b]);
-    vi.restoreAllMocks();
   });
 
   it("close() durante a troca não aplica a pendente", async () => {
@@ -205,5 +206,14 @@ describe("PeerLink (vídeo)", () => {
     link.onVideo((x) => got.push(x)); // a guardada não sai depois do close
     pc.ontrack?.({ track: track() });
     expect(got).toEqual([]);
+  });
+
+  it("onVideo registrado antes do close() não recebe ontrack depois", () => {
+    const link = make("guest");
+    const cb = vi.fn();
+    link.onVideo(cb);
+    link.close();
+    pc.ontrack?.({ track: track() });
+    expect(cb).not.toHaveBeenCalled();
   });
 });

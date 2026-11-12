@@ -385,6 +385,31 @@ mod tests {
     }
 
     #[test]
+    fn valid_code_multibyte_is_false_without_panic() {
+        // Fatiar por bytes não pode cair no meio de um caractere.
+        for (code, len) in [
+            ("PATÓ-4821", 10),
+            ("PATÓ-482", 9),
+            ("PATO-48²", 9),
+            ("ÁBC-4821", 9),
+        ] {
+            assert_eq!(code.len(), len, "{code}");
+            assert!(!valid_code(code), "{code}");
+        }
+    }
+
+    #[test]
+    fn remember_join_blank_name_becomes_default() {
+        let state = AppState::new();
+        for blank in ["   ", " \n\t "] {
+            state
+                .remember_join("PATO-4821".into(), blank, Animal::Chicken)
+                .unwrap();
+            assert_eq!(state.last_join().unwrap().name, "Jogador");
+        }
+    }
+
+    #[test]
     fn app_state_rejects_second_session() {
         let state = AppState::new();
         state.enter_guest(|| guest_handle().0).unwrap();

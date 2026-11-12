@@ -147,6 +147,8 @@ let getDisplayMedia: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.useFakeTimers();
+  // O seletor recusa por padrão: o `console.debug` da recusa só polui a saída.
+  vi.spyOn(console, "debug").mockImplementation(() => {});
   h.invoke.mockClear();
   last = null;
   started = { aspect: 16 / 9, overlay_in_video: false };
@@ -200,6 +202,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("espera depois de conectar", () => {
@@ -420,6 +423,32 @@ describe("compartilhamento de tela no Host", () => {
     await flush();
     expect(h.setVideo).toHaveBeenLastCalledWith(t);
     expect(byText("button", "Trocar tela")).toBeDefined();
+  });
+
+  it("track escolhida durante a conexão vai por setVideo quando a sala abre", async () => {
+    const pick = pendingCapture();
+    let open!: () => void;
+    h.startHostNet.mockImplementation(
+      (_cfg: unknown, onCode: (c: string) => void) =>
+        new Promise((r) => {
+          open = () => {
+            onCode("PATO-4821");
+            r({ stop: h.stop, setVideo: h.setVideo });
+          };
+        }),
+    );
+    await clickCreate();
+    await flush();
+    expect(h.startHostNet).toHaveBeenCalledTimes(1);
+    expect(h.startHostNet.mock.calls[0][3]).toBeNull();
+    const t = fakeTrack();
+    pick(t);
+    await flush();
+    expect(h.setVideo).not.toHaveBeenCalled(); // ainda sem sessão
+    open();
+    await flush();
+    expect(h.setVideo).toHaveBeenCalledTimes(1);
+    expect(h.setVideo).toHaveBeenCalledWith(t);
   });
 
   it("Encerrar para a track antes do session.stop()", async () => {
