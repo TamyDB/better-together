@@ -24,6 +24,7 @@ import { LOOK } from "../render/placeholder";
 import type { Animal, LastJoin, RosterEntry, Snapshot } from "../types";
 import { chatBox, emoteBar, listenSocial, VISIBLE_LINES, type ChatBox } from "./chat";
 import { HostVideo } from "./host-video";
+import { bindGameKeys } from "./keyboard";
 import { ANIMAL_LABEL, lastCode, rejectMessage, rejoinChoice, type RejectReason } from "./labels";
 
 const ANIMALS = Object.keys(ANIMAL_LABEL) as Animal[];
@@ -113,6 +114,9 @@ async function goBack(session: NetSession | null, video: HostVideo | null = null
 
 const sendChat = (text: string) => void invoke("chat_send", { text }).catch(() => {});
 const sendEmote = (emote: string) => void invoke("emote_send", { emote }).catch(() => {});
+/** No Host vai para o modo bichinho (que ignora com o modo desligado); no convidado, para a sessão. */
+const sendKey = (code: string, down: boolean) =>
+  void invoke("key_event", { code, down }).catch(() => {});
 
 function namesOf(roster: RosterEntry[]): Map<number, string> {
   return new Map(roster.map((r) => [r.id, r.name]));
@@ -232,6 +236,12 @@ async function hostFlow(name: string, animal: Animal): Promise<void> {
 
   show("center", el("h1", { text: "Criando sala..." }));
   const unlisten: UnlistenFn[] = [];
+  // Com o painel em foco o hook do Windows fica inativo: o teclado do modo bichinho vem daqui.
+  let unbindKeys: (() => void) | null = null;
+  const stopKeys = () => {
+    unbindKeys?.();
+    unbindKeys = null;
+  };
   try {
     const started = await invoke<HostStarted>("host_start", { name, animal });
     aspect = started.aspect;
@@ -277,6 +287,7 @@ async function hostFlow(name: string, animal: Animal): Promise<void> {
           ...hostPanel(c, {
             onEnd: (end) => {
               end.disabled = true;
+              stopKeys();
               unlisten.forEach((u) => u());
               void goBack(session, video);
             },
@@ -289,6 +300,8 @@ async function hostFlow(name: string, animal: Animal): Promise<void> {
             chat,
           }),
         );
+        stopKeys();
+        unbindKeys = bindGameKeys({ input: chat.input, onKey: sendKey });
       },
       () => {
         warn.textContent = "Conexão com o servidor perdida: novos amigos não conseguem entrar";
@@ -298,6 +311,7 @@ async function hostFlow(name: string, animal: Animal): Promise<void> {
     // O seletor pode ter respondido durante o `startHostNet`.
     session.setVideo(sent);
   } catch (e) {
+    stopKeys();
     unlisten.forEach((u) => u());
     video.dispose();
     backScreen("Não foi possível criar a sala", errorText(e), session);
@@ -614,35 +628,8 @@ function showViewer(aspect: number, leave: () => void): ViewerHandle {
     }),
   );
 
-  // Só aqui o teclado vai para o Rust; `blur` solta o que estiver pressionado.
-  const pressed = new Set<string>();
-  const send = (code: string, down: boolean) => invoke("key_event", { code, down }).catch(() => {});
-  // Digitando no chat o teclado é do campo: nada vai para o Rust.
-  const typing = (e: KeyboardEvent) => document.activeElement === chat.input || e.target === chat.input;
-  const onBlur = () => {
-    for (const c of pressed) send(c, false);
-    pressed.clear();
-  };
-  const onDown = (e: KeyboardEvent) => {
-    if (typing(e)) return;
-    if (e.key === "Enter") {
-      // Solta o que estava pressionado antes de o campo ficar com o teclado.
-      onBlur();
-      chat.input.focus();
-      return;
-    }
-    pressed.add(e.code);
-    send(e.code, true);
-  };
-  const onUp = (e: KeyboardEvent) => {
-    if (typing(e) || e.key === "Enter") return;
-    pressed.delete(e.code);
-    send(e.code, false);
-  };
-  chat.input.addEventListener("focus", onBlur);
-  window.addEventListener("keydown", onDown);
-  window.addEventListener("keyup", onUp);
-  window.addEventListener("blur", onBlur);
+  // Só aqui (e no painel do Host) o teclado vai para o Rust.
+  const unbindKeys = bindGameKeys({ input: chat.input, onKey: sendKey });
 
   // Aguardando até o primeiro `playing`; depois disso, quadros parados (ou `mute` da track,
   // como reforço) são o Host pausando.
@@ -707,10 +694,7 @@ function showViewer(aspect: number, leave: () => void): ViewerHandle {
       unlistens.forEach((u) => u());
       chat.dispose();
       window.removeEventListener("resize", layout);
-      window.removeEventListener("keydown", onDown);
-      window.removeEventListener("keyup", onUp);
-      window.removeEventListener("blur", onBlur);
-      onBlur();
+      unbindKeys();
     },
   };
 }

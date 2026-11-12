@@ -76,6 +76,7 @@ class FakeEl {
   }
   focus() {
     doc.activeElement = this;
+    this.fire("focus");
   }
   blur() {
     if (doc.activeElement === this) doc.activeElement = null;
@@ -779,8 +780,8 @@ describe("chat e emotes", () => {
     fireWin("keydown", ev);
     fireWin("keyup", ev);
   };
-  const press = (name: "keydown" | "keyup", code: string, k = code) =>
-    fireWin(name, { code, key: k, target: doc.activeElement });
+  const press = (name: "keydown" | "keyup", code: string, k = code, repeat = false) =>
+    fireWin(name, { code, key: k, target: doc.activeElement, repeat });
   const inputKey = (k: string) => {
     const ev = { code: k, key: k, target: chatInput() };
     chatInput().fire("keydown", ev);
@@ -861,6 +862,90 @@ describe("chat e emotes", () => {
     await inViewer();
     emit("session://chat", { from: 7, text: "oi" });
     expect(walk(app).map((e) => e.textContent)).toContain("Jogador: oi");
+  });
+
+  it("keyup do Enter que enviou não é repassado", async () => {
+    await inViewer();
+    press("keydown", "Enter");
+    chatInput().value = "oi";
+    chatInput().fire("keydown", { code: "Enter", key: "Enter", target: chatInput() });
+    h.invoke.mockClear();
+    press("keyup", "Enter");
+    expect(keyCalls()).toEqual([]);
+  });
+
+  it("focar o campo com clique solta as teclas", async () => {
+    await inViewer();
+    press("keydown", "KeyW");
+    h.invoke.mockClear();
+    chatInput().focus();
+    expect(keyCalls()).toEqual([{ code: "KeyW", down: false }]);
+  });
+
+  it("Host: painel sem campo focado repassa as teclas ao key_event", async () => {
+    await clickCreate();
+    await flush();
+    h.invoke.mockClear();
+    press("keydown", "KeyW");
+    press("keyup", "KeyW");
+    press("keydown", "Escape");
+    expect(keyCalls()).toEqual([
+      { code: "KeyW", down: true },
+      { code: "KeyW", down: false },
+      { code: "Escape", down: true },
+    ]);
+  });
+
+  it("Host: digitar no campo do painel não chama key_event", async () => {
+    await clickCreate();
+    await flush();
+    press("keydown", "KeyW");
+    h.invoke.mockClear();
+    press("keydown", "Enter");
+    expect(doc.activeElement).toBe(chatInput());
+    expect(keyCalls()).toEqual([{ code: "KeyW", down: false }]);
+    h.invoke.mockClear();
+    for (const c of ["KeyW", "KeyA", "Digit1"]) {
+      press("keydown", c);
+      press("keyup", c);
+    }
+    expect(keyCalls()).toEqual([]);
+  });
+
+  it("Host: depois de enviar o foco volta ao painel e Enter reabre o campo", async () => {
+    await clickCreate();
+    await flush();
+    press("keydown", "Enter");
+    chatInput().value = "oi";
+    inputKey("Enter");
+    expect(h.invoke).toHaveBeenCalledWith("chat_send", { text: "oi" });
+    expect(doc.activeElement).toBeNull();
+    press("keydown", "Enter");
+    expect(doc.activeElement).toBe(chatInput());
+  });
+
+  it("Host: Encerrar solta as teclas e para de repassar", async () => {
+    await clickCreate();
+    await flush();
+    press("keydown", "KeyD");
+    h.invoke.mockClear();
+    byText("button", "Encerrar")!.onclick?.();
+    expect(keyCalls()).toEqual([{ code: "KeyD", down: false }]);
+    press("keydown", "KeyW");
+    expect(keyCalls()).toEqual([{ code: "KeyD", down: false }]);
+  });
+
+  it("Host: erro ao criar a sala depois do painel para de repassar", async () => {
+    h.startHostNet.mockImplementation(async (_cfg: unknown, onCode: (c: string) => void) => {
+      onCode("PATO-4821");
+      throw new Error("falhou");
+    });
+    await clickCreate();
+    await flush();
+    expect(title()).toBe("Não foi possível criar a sala");
+    h.invoke.mockClear();
+    press("keydown", "KeyW");
+    expect(keyCalls()).toEqual([]);
   });
 
   it("Host: painel tem campo, 6 emotes e envia chat", async () => {
