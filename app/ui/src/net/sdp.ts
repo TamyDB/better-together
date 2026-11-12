@@ -5,7 +5,7 @@ export const MAX_SDP_BYTES = 32 * 1024;
 
 /**
  * O Host é sempre o offerer: só aceita `answer`; o convidado só aceita `offer`.
- * Só `video` e `application` (um de cada) são mídias válidas. Pura, nunca lança.
+ * Só `video` (0 ou 1) e `application` (exatamente 1) são mídias válidas. Pura, nunca lança.
  */
 export function acceptSdp(role: Role, sdp: RTCSessionDescriptionInit): boolean {
   if (typeof sdp !== "object" || sdp === null) return false;
@@ -21,5 +21,5 @@ export function acceptSdp(role: Role, sdp: RTCSessionDescriptionInit): boolean {
     else if (kind === "application") application++;
     else return false;
   }
-  return video <= 1 && application <= 1;
+  return video <= 1 && application === 1;
 }

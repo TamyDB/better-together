@@ -24,8 +24,41 @@ describe("acceptSdp", () => {
   });
 
   it("rejects_oversized", () => {
-    expect(acceptSdp("host", { type: "answer", sdp: "a".repeat(MAX_SDP_BYTES + 1) })).toBe(false);
-    expect(acceptSdp("host", { type: "answer", sdp: "a".repeat(MAX_SDP_BYTES) })).toBe(true);
+    const base = "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\n";
+    const pad = (n: number) => `a=${"x".repeat(n - 3)}\n`;
+    const exact = base + pad(MAX_SDP_BYTES - base.length);
+    expect(exact.length).toBe(MAX_SDP_BYTES);
+    expect(acceptSdp("host", { type: "answer", sdp: exact })).toBe(true);
+    expect(acceptSdp("host", { type: "answer", sdp: exact + "a" })).toBe(false);
+  });
+
+  it("rejects_missing_application", () => {
+    expect(acceptSdp("host", sdp("answer", ["video"]))).toBe(false);
+    expect(acceptSdp("host", sdp("answer", []))).toBe(false);
+  });
+
+  it("m_line_so_no_inicio_da_linha", () => {
+    const base = ["v=0", "m=video 9 X", "m=application 9 X"];
+    expect(acceptSdp("host", { type: "answer", sdp: [...base, "a=x m=audio", ""].join("\r\n") })).toBe(true);
+    expect(acceptSdp("host", { type: "answer", sdp: [...base, " m=audio 9 X", ""].join("\r\n") })).toBe(true);
+  });
+
+  it("rejects_audio_depois_de_validas", () => {
+    expect(acceptSdp("host", sdp("answer", ["video", "application", "audio"]))).toBe(false);
+  });
+
+  it("rejects_sdp_vazio_e_tipos_estranhos", () => {
+    expect(acceptSdp("host", { type: "answer", sdp: "" })).toBe(false);
+    for (const type of ["pranswer", "rollback"]) {
+      const d = { type, sdp: sdp("answer", ["video", "application"]).sdp } as RTCSessionDescriptionInit;
+      expect(acceptSdp("host", d)).toBe(false);
+      expect(acceptSdp("guest", d)).toBe(false);
+    }
+  });
+
+  it("rejects_dois_video_com_eol_misto", () => {
+    const text = "v=0\nm=video 9 X\r\nm=video 9 X\nm=application 9 X\r\n";
+    expect(acceptSdp("host", { type: "answer", sdp: text })).toBe(false);
   });
 
   it("accepts_crlf_and_lf", () => {
