@@ -22,6 +22,29 @@ impl Animal {
     ];
 }
 
+/// Emotes que um jogador pode soltar sobre o bichinho.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum Emote {
+    Heart,
+    Laugh,
+    Wow,
+    Angry,
+    Music,
+    Question,
+}
+
+impl Emote {
+    pub const ALL: [Emote; 6] = [
+        Emote::Heart,
+        Emote::Laugh,
+        Emote::Wow,
+        Emote::Angry,
+        Emote::Music,
+        Emote::Question,
+    ];
+}
+
 /// Posição normalizada em [0,1] relativa ao monitor primário do Host.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct Vec2 {

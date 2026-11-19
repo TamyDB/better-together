@@ -1,3 +1,5 @@
+export type { ChatMsg, Emote } from "./social";
+
 // Espelho dos tipos de `dm-protocol` como chegam pelo evento `sim://snapshot` (JSON serde).
 
 export type Animal = "duck" | "capybara" | "horse" | "chicken";

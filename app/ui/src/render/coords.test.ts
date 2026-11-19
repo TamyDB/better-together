@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { backingSize, petAnchor, toPixels } from "./coords";
+import { backingSize, clampCenter, petAnchor, toPixels } from "./coords";
 
 describe("toPixels", () => {
   it("mapeia a posição normalizada para pixels CSS", () => {
@@ -28,5 +28,18 @@ describe("petAnchor", () => {
     // pés no centro-inferior do sprite 64×64
     expect(petAnchor({ x: 0, y: 0 }, 1920, 1080, 64)).toEqual({ x: 32, y: 64 });
     expect(petAnchor({ x: 1, y: 1 }, 1920, 1080, 64)).toEqual({ x: 1888, y: 1080 });
+  });
+});
+
+describe("clampCenter", () => {
+  it("mantém o centro onde cabe e encosta nas bordas", () => {
+    expect(clampCenter(500, 100, 1000)).toBe(500);
+    expect(clampCenter(10, 100, 1000)).toBe(50);
+    expect(clampCenter(-30, 100, 1000)).toBe(50);
+    expect(clampCenter(990, 100, 1000)).toBe(950);
+  });
+
+  it("mais largo que a área fica centralizado", () => {
+    expect(clampCenter(10, 300, 200)).toBe(100);
   });
 });

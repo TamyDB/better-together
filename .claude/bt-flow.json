@@ -1,20 +1,19 @@
 {
-  "milestone": "M3 Vídeo",
-  "plan": "docs/superpowers/plans/2026-11-12-m3-video.md",
-  "ledger": ".superpowers/sdd/2026-11-12-m3-video/progress.md",
+  "milestone": "M4 Social",
+  "plan": "docs/superpowers/plans/2026-11-13-m4-social.md",
+  "ledger": ".superpowers/sdd/2026-11-13-m4-social/progress.md",
   "tasks": {
     "1": "implementer",
-    "2": "implementer",
+    "2": "implementer-senior",
     "3": "implementer-senior",
     "4": "implementer-senior",
     "5": "implementer",
-    "6": "implementer-senior",
-    "7": "implementer",
-    "8": "implementer"
+    "6": "implementer",
+    "7": "implementer"
   },
   "reviewModel": {
+    "2": "opus",
     "3": "opus",
-    "4": "opus",
-    "6": "opus"
+    "4": "opus"
   }
 }

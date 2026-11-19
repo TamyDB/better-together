@@ -4,14 +4,14 @@
 use std::collections::VecDeque;
 
 use dm_protocol::{
-    decode, encode, sanitize_name, Animal, Channel, GuestMsg, HostMsg, InputFrame, PetState,
-    PlayerId, RejectReason, RosterEntry, Snapshot, PROTOCOL_VERSION,
+    decode, encode, sanitize_chat, sanitize_name, Animal, Channel, Emote, GuestMsg, HostMsg,
+    InputFrame, PetState, PlayerId, RejectReason, RosterEntry, Snapshot, PROTOCOL_VERSION,
 };
 use dm_sim::World;
 
 use super::interp::{Interpolator, INTERP_DELAY_TICKS};
 use super::net::{NetIn, Out, PeerId};
-use crate::input::keys::{Key, KeyState};
+use crate::input::keys::{EmoteKeys, Key, KeyState};
 
 /// O convidado só conversa com o Host, sempre neste peer.
 pub const HOST_PEER: PeerId = 0;
@@ -19,6 +19,9 @@ pub const HOST_PEER: PeerId = 0;
 pub const MAX_PENDING: usize = 120;
 /// Ticks sem snapshot novo até o convidado dar o Host por perdido (10 s a 60 Hz).
 pub const HOST_SILENCE_TICKS: u32 = 600;
+/// Mensagens de `events` à espera de `take_outgoing`. O loop drena a cada comando; o teto
+/// só protege contra quem não drenar. O Host limita os emotes de qualquer forma.
+const MAX_OUTGOING: usize = 32;
 
 const GUEST_FALLBACK_NAME: &str = "Convidado";
 const ROSTER_FALLBACK_NAME: &str = "Jogador";
@@ -34,6 +37,14 @@ pub enum GuestEvent {
     Rejected(RejectReason),
     Roster(Vec<RosterEntry>),
     HostLost,
+    Chat {
+        from: PlayerId,
+        text: String,
+    },
+    Emote {
+        from: PlayerId,
+        emote: Emote,
+    },
 }
 
 /// Estado da partida, criado no `Welcome`.
@@ -80,12 +91,15 @@ impl Playing {
 pub struct GuestClient {
     rejoin_token: u64,
     keys: KeyState,
+    emote_keys: EmoteKeys,
     playing: Option<Playing>,
     /// Depois de `HostLost` o cliente fica encerrado; reconectar usa um novo cliente com o
     /// mesmo `rejoin_token`.
     lost: bool,
     /// O watchdog encerrou o cliente e `take_lost_event` ainda não entregou o `HostLost`.
     silence_lost: bool,
+    /// Emotes das teclas `1`–`6`, à espera de `take_outgoing`.
+    outgoing: Vec<Out>,
 }
 
 impl GuestClient {
@@ -93,9 +107,11 @@ impl GuestClient {
         GuestClient {
             rejoin_token,
             keys: KeyState::default(),
+            emote_keys: EmoteKeys::default(),
             playing: None,
             lost: false,
             silence_lost: false,
+            outgoing: Vec::new(),
         }
     }
 
@@ -112,11 +128,7 @@ impl GuestClient {
             desired_animal: animal,
             rejoin_token: self.rejoin_token,
         };
-        Out::Send {
-            peer: HOST_PEER,
-            channel: Channel::Events,
-            bytes: encode(&hello),
-        }
+        to_host(&hello)
     }
 
     pub fn handle(&mut self, ev: NetIn) -> Vec<GuestEvent> {
@@ -127,6 +139,7 @@ impl GuestClient {
             NetIn::PeerClosed(HOST_PEER) => {
                 self.lost = true;
                 self.playing = None;
+                self.outgoing.clear();
                 vec![GuestEvent::HostLost]
             }
             NetIn::Recv {
@@ -138,8 +151,34 @@ impl GuestClient {
         }
     }
 
+    /// Teclas de movimento entram no input do próximo `tick`. Key-down de emote enfileira um
+    /// `GuestMsg::Emote` para `take_outgoing`, só na borda (o autorepeat não reenvia; ver
+    /// `EmoteKeys`); key-up de emote só solta a tecla. Antes do `Welcome` ou depois de
+    /// `HostLost`, emotes são descartados.
     pub fn set_key(&mut self, key: Key, down: bool) {
-        self.keys.set(key, down);
+        match key {
+            Key::Emote(emote) => {
+                let fresh = self.emote_keys.press(emote, down);
+                if fresh && self.playing.is_some() && self.outgoing.len() < MAX_OUTGOING {
+                    self.outgoing.push(to_host(&GuestMsg::Emote(emote)));
+                }
+            }
+            _ => self.keys.set(key, down),
+        }
+    }
+
+    /// Mensagens de `events` geradas por `set_key` (emotes), em ordem. O loop chama depois
+    /// de cada comando, para o emote não esperar o próximo tick.
+    pub fn take_outgoing(&mut self) -> Vec<Out> {
+        std::mem::take(&mut self.outgoing)
+    }
+
+    /// Mensagem de chat para o Host, já limpa. Só depois do `Welcome`; texto vazio depois de
+    /// limpo → `None`. Sem limite local: o Host decide, e a mensagem só aparece no eco dele.
+    pub fn chat(&mut self, text: &str) -> Option<Out> {
+        self.playing.as_ref()?;
+        let text = sanitize_chat(text)?;
+        Some(to_host(&GuestMsg::Chat { text }))
     }
 
     /// `HostLost` decidido pelo watchdog de silêncio em `tick`; sai uma única vez.
@@ -161,6 +200,7 @@ impl GuestClient {
             self.lost = true;
             self.silence_lost = true;
             self.playing = None;
+            self.outgoing.clear();
             return (None, None);
         }
         let frame = self.keys.to_input(p.next_seq);
@@ -230,6 +270,23 @@ impl GuestClient {
             (HostMsg::Snapshot(snapshot), Channel::State) => {
                 self.on_snapshot(snapshot);
                 Vec::new()
+            }
+            (HostMsg::Chat { .. } | HostMsg::Emote { .. }, Channel::Events)
+                if self.playing.is_none() =>
+            {
+                log::debug!("Host: chat/emote antes do Welcome; ignorado");
+                Vec::new()
+            }
+            // O Host também não é confiável: o texto é limpo de novo antes de chegar à UI.
+            (HostMsg::Chat { from, text }, Channel::Events) => match sanitize_chat(&text) {
+                Some(text) => vec![GuestEvent::Chat { from, text }],
+                None => {
+                    log::debug!("Host: chat vazio depois de limpo; ignorado");
+                    Vec::new()
+                }
+            },
+            (HostMsg::Emote { from, emote }, Channel::Events) => {
+                vec![GuestEvent::Emote { from, emote }]
             }
             (_, channel) => {
                 log::debug!("Host: mensagem no canal errado ({channel:?}); ignorada");
@@ -305,6 +362,15 @@ impl GuestClient {
     }
 }
 
+/// Mensagem ao Host pelo canal `events` (confiável e ordenado).
+fn to_host(msg: &GuestMsg) -> Out {
+    Out::Send {
+        peer: HOST_PEER,
+        channel: Channel::Events,
+        bytes: encode(msg),
+    }
+}
+
 /// Descarta pets fora de `[0, 1]`, o que inclui NaN e infinitos. Valores finitos gigantes
 /// também não passam: o `lerp` os transformaria em NaN e envenenaria a predição e o render.
 fn retain_on_screen(snapshot: &mut Snapshot) {
@@ -316,8 +382,8 @@ fn retain_on_screen(snapshot: &mut Snapshot) {
 mod tests {
     use super::*;
     use dm_protocol::{
-        decode, encode, AnimState, Channel, Facing, GuestMsg, HostMsg, InputFrame, PetState, Vec2,
-        PROTOCOL_VERSION,
+        decode, encode, AnimState, Channel, Emote, Facing, GuestMsg, HostMsg, InputFrame, PetState,
+        Vec2, MAX_CHAT_CHARS, PROTOCOL_VERSION,
     };
     use dm_sim::consts::{DT, WALK_SPEED};
     use dm_sim::World;
@@ -741,6 +807,181 @@ mod tests {
         }
         assert_eq!(g.tick(), (None, None));
         assert_eq!(g.take_lost_event(), Some(GuestEvent::HostLost));
+    }
+
+    /// A `GuestMsg` de um `Out`, que precisa ir ao Host pelo canal `Events`.
+    fn sent_event(out: &Out) -> GuestMsg {
+        match out {
+            Out::Send {
+                peer: HOST_PEER,
+                channel: Channel::Events,
+                bytes,
+            } => decode::<GuestMsg>(bytes).unwrap(),
+            other => panic!("esperava Send em Events, veio {other:?}"),
+        }
+    }
+
+    #[test]
+    fn chat_before_welcome_is_none() {
+        let mut g = GuestClient::new(42);
+        assert_eq!(g.chat("oi"), None);
+        g.handle(from_host(
+            Channel::Events,
+            &HostMsg::Lobby { taken: vec![] },
+        ));
+        assert_eq!(g.chat("oi"), None);
+    }
+
+    #[test]
+    fn chat_after_welcome_sends_on_events() {
+        let mut g = welcomed(0.5, 0.5, 0);
+        let out = g.chat("  oi\u{202E}   gente ").expect("chat");
+        assert_eq!(
+            sent_event(&out),
+            GuestMsg::Chat {
+                text: "oi gente".into()
+            }
+        );
+        // Sem limite local: o Host decide.
+        for _ in 0..20 {
+            assert!(g.chat("de novo").is_some());
+        }
+        // Encerrado: nada sai.
+        g.handle(NetIn::PeerClosed(HOST_PEER));
+        assert_eq!(g.chat("oi"), None);
+    }
+
+    #[test]
+    fn chat_blank_is_none() {
+        let mut g = welcomed(0.5, 0.5, 0);
+        assert_eq!(g.chat(""), None);
+        assert_eq!(g.chat("   "), None);
+        assert_eq!(g.chat("\u{200B}\u{202E}\n"), None);
+    }
+
+    #[test]
+    fn emote_key_sends_once() {
+        let mut g = welcomed(0.5, 0.5, 0);
+        let emote = Key::from_code("Digit2").unwrap();
+        g.set_key(emote, true);
+        let outs = g.take_outgoing();
+        assert_eq!(outs.len(), 1);
+        assert_eq!(sent_event(&outs[0]), GuestMsg::Emote(Emote::Laugh));
+        assert!(g.take_outgoing().is_empty());
+        // Key-up não manda nada.
+        g.set_key(emote, false);
+        assert!(g.take_outgoing().is_empty());
+        // Só na borda: o autorepeat (key-downs sem key-up) não reenvia.
+        for _ in 0..3 {
+            g.set_key(emote, true);
+        }
+        let outs = g.take_outgoing();
+        assert_eq!(outs.len(), 1);
+        assert_eq!(sent_event(&outs[0]), GuestMsg::Emote(Emote::Laugh));
+        // Segurando o `2`, o `3` é outra tecla e sai.
+        g.set_key(Key::Emote(Emote::Wow), true);
+        g.set_key(emote, true);
+        let outs = g.take_outgoing();
+        assert_eq!(outs.len(), 1);
+        assert_eq!(sent_event(&outs[0]), GuestMsg::Emote(Emote::Wow));
+        // Solta e aperta de novo: outro emote; quem limita é o Host.
+        g.set_key(emote, false);
+        g.set_key(emote, true);
+        assert_eq!(g.take_outgoing().len(), 1);
+        // O emote não mexe no pet: o input do tick continua parado.
+        let (out, _) = g.tick();
+        let f = sent_input(&out.unwrap());
+        assert_eq!((f.move_x, f.move_y, f.run), (0, 0, false));
+        assert!(g.take_outgoing().is_empty());
+    }
+
+    #[test]
+    fn undrained_emotes_are_capped() {
+        let mut g = welcomed(0.5, 0.5, 0);
+        for _ in 0..1000 {
+            g.set_key(Key::Emote(Emote::Wow), true);
+            g.set_key(Key::Emote(Emote::Wow), false);
+        }
+        assert_eq!(g.take_outgoing().len(), MAX_OUTGOING);
+        g.set_key(Key::Emote(Emote::Wow), true);
+        assert_eq!(g.take_outgoing().len(), 1);
+    }
+
+    #[test]
+    fn emote_key_before_welcome_or_after_loss_sends_nothing() {
+        let mut g = GuestClient::new(42);
+        g.set_key(Key::Emote(Emote::Heart), true);
+        assert!(g.take_outgoing().is_empty());
+
+        let mut g = welcomed(0.5, 0.5, 0);
+        g.set_key(Key::Emote(Emote::Heart), true);
+        // O Host caiu antes do loop drenar: o emote pendente não sai mais.
+        g.handle(NetIn::PeerClosed(HOST_PEER));
+        assert!(g.take_outgoing().is_empty());
+        g.set_key(Key::Emote(Emote::Heart), false);
+        g.set_key(Key::Emote(Emote::Heart), true);
+        assert!(g.take_outgoing().is_empty());
+    }
+
+    #[test]
+    fn host_chat_becomes_event() {
+        let mut g = welcomed(0.5, 0.5, 0);
+        let chat = |text: &str| HostMsg::Chat {
+            from: PlayerId(2),
+            text: text.into(),
+        };
+        assert_eq!(
+            g.handle(from_host(Channel::Events, &chat("oi\u{202E}lá"))),
+            vec![GuestEvent::Chat {
+                from: PlayerId(2),
+                text: "oilá".into()
+            }]
+        );
+        // Host não confiável: texto gigante é cortado; só invisíveis não gera evento.
+        match g
+            .handle(from_host(Channel::Events, &chat(&"x".repeat(10_000))))
+            .as_slice()
+        {
+            [GuestEvent::Chat { text, .. }] => assert_eq!(text.chars().count(), MAX_CHAT_CHARS),
+            other => panic!("esperava um Chat, veio {other:?}"),
+        }
+        assert!(g
+            .handle(from_host(Channel::Events, &chat("\u{200B}\u{202E}  ")))
+            .is_empty());
+        // Canal errado: ignorado.
+        assert!(g.handle(from_host(Channel::State, &chat("oi"))).is_empty());
+    }
+
+    #[test]
+    fn host_emote_becomes_event() {
+        let mut g = welcomed(0.5, 0.5, 0);
+        let msg = HostMsg::Emote {
+            from: PlayerId(0),
+            emote: Emote::Music,
+        };
+        assert_eq!(
+            g.handle(from_host(Channel::Events, &msg)),
+            vec![GuestEvent::Emote {
+                from: PlayerId(0),
+                emote: Emote::Music
+            }]
+        );
+        assert!(g.handle(from_host(Channel::State, &msg)).is_empty());
+    }
+
+    #[test]
+    fn host_chat_before_welcome_ignored() {
+        let mut g = GuestClient::new(42);
+        let chat = HostMsg::Chat {
+            from: PlayerId(0),
+            text: "oi".into(),
+        };
+        let emote = HostMsg::Emote {
+            from: PlayerId(0),
+            emote: Emote::Heart,
+        };
+        assert!(g.handle(from_host(Channel::Events, &chat)).is_empty());
+        assert!(g.handle(from_host(Channel::Events, &emote)).is_empty());
     }
 
     #[test]

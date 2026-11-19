@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use dm_protocol::{Animal, RosterEntry};
+use dm_protocol::{Animal, Emote, RosterEntry};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -163,6 +163,18 @@ fn key_event(state: State<'_, AppState>, code: String, down: bool) -> Result<(),
     Ok(())
 }
 
+/// Mensagem do campo de chat; aparece para todos (inclusive quem mandou) no eco do Host.
+#[tauri::command]
+fn chat_send(state: State<'_, AppState>, text: String) -> Result<(), String> {
+    state.chat_send(text)
+}
+
+/// Botões de emote da UI.
+#[tauri::command]
+fn emote_send(state: State<'_, AppState>, emote: Emote) -> Result<(), String> {
+    state.emote_send(emote)
+}
+
 #[tauri::command]
 fn toggle_pet_mode(state: State<'_, AppState>) -> Result<(), String> {
     state.toggle_pet()
@@ -219,6 +231,8 @@ pub fn run() {
             net_peer_closed,
             net_recv,
             key_event,
+            chat_send,
+            emote_send,
             toggle_pet_mode,
             session_reset,
             enter_viewer,

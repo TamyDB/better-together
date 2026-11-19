@@ -22,7 +22,9 @@ import { startRenderer } from "../render/canvas";
 import { fitRect } from "../render/fit";
 import { LOOK } from "../render/placeholder";
 import type { Animal, LastJoin, RosterEntry, Snapshot } from "../types";
+import { chatBox, emoteBar, listenSocial, VISIBLE_LINES, type ChatBox } from "./chat";
 import { HostVideo } from "./host-video";
+import { bindGameKeys } from "./keyboard";
 import { ANIMAL_LABEL, lastCode, rejectMessage, rejoinChoice, type RejectReason } from "./labels";
 
 const ANIMALS = Object.keys(ANIMAL_LABEL) as Animal[];
@@ -108,6 +110,16 @@ async function goBack(session: NetSession | null, video: HostVideo | null = null
     await invoke("session_reset").catch(() => {});
   }
   location.reload();
+}
+
+const sendChat = (text: string) => void invoke("chat_send", { text }).catch(() => {});
+const sendEmote = (emote: string) => void invoke("emote_send", { emote }).catch(() => {});
+/** No Host vai para o modo bichinho (que ignora com o modo desligado); no convidado, para a sessão. */
+const sendKey = (code: string, down: boolean) =>
+  void invoke("key_event", { code, down }).catch(() => {});
+
+function namesOf(roster: RosterEntry[]): Map<number, string> {
+  return new Map(roster.map((r) => [r.id, r.name]));
 }
 
 function errorText(e: unknown): string {
@@ -224,6 +236,12 @@ async function hostFlow(name: string, animal: Animal): Promise<void> {
 
   show("center", el("h1", { text: "Criando sala..." }));
   const unlisten: UnlistenFn[] = [];
+  // Com o painel em foco o hook do Windows fica inativo: o teclado do modo bichinho vem daqui.
+  let unbindKeys: (() => void) | null = null;
+  const stopKeys = () => {
+    unbindKeys?.();
+    unbindKeys = null;
+  };
   try {
     const started = await invoke<HostStarted>("host_start", { name, animal });
     aspect = started.aspect;
@@ -246,42 +264,44 @@ async function hostFlow(name: string, animal: Animal): Promise<void> {
           ),
         ),
       );
+    const chat = chatBox({
+      names: () => namesOf(roster),
+      onSend: sendChat,
+      visible: VISIBLE_LINES,
+      onDone: () => chat.input.blur(),
+    });
     unlisten.push(
       await listen<RosterEntry[]>("session://roster", (e) => {
         roster = e.payload;
         renderRoster();
       }),
+      await listenSocial({ chat: (m) => chat.push(m), emote: () => {} }),
     );
 
     session = await startHostNet(
       cfg,
       (c) => {
-        const copy = el("button", { cls: "secondary", text: "Copiar" });
-        copy.onclick = () => {
-          navigator.clipboard.writeText(c).then(
-            () => (copy.textContent = "Copiado!"),
-            () => {},
-          );
-          setTimeout(() => (copy.textContent = "Copiar"), 1500);
-        };
-        const end = el("button", { cls: "secondary", text: "Encerrar" });
-        end.onclick = () => {
-          end.disabled = true;
-          unlisten.forEach((u) => u());
-          void goBack(session, video);
-        };
         renderRoster();
         show(
           "",
-          el("div", { cls: "code", text: c }),
-          el("div", { cls: "row" }, copy, end),
-          status,
-          controls,
-          captureWarn,
-          started.overlay_in_video ? el("div", { cls: "warn", text: OVERLAY_IN_VIDEO }) : null,
-          warn,
-          list,
+          ...hostPanel(c, {
+            onEnd: (end) => {
+              end.disabled = true;
+              stopKeys();
+              unlisten.forEach((u) => u());
+              void goBack(session, video);
+            },
+            status,
+            controls,
+            captureWarn,
+            overlayWarn: started.overlay_in_video,
+            warn,
+            list,
+            chat,
+          }),
         );
+        stopKeys();
+        unbindKeys = bindGameKeys({ input: chat.input, onKey: sendKey });
       },
       () => {
         warn.textContent = "Conexão com o servidor perdida: novos amigos não conseguem entrar";
@@ -291,10 +311,48 @@ async function hostFlow(name: string, animal: Animal): Promise<void> {
     // O seletor pode ter respondido durante o `startHostNet`.
     session.setVideo(sent);
   } catch (e) {
+    stopKeys();
     unlisten.forEach((u) => u());
     video.dispose();
     backScreen("Não foi possível criar a sala", errorText(e), session);
   }
+}
+
+interface HostPanelParts {
+  onEnd: (end: HTMLButtonElement) => void;
+  status: HTMLElement;
+  controls: HTMLElement;
+  captureWarn: HTMLElement;
+  overlayWarn: boolean;
+  warn: HTMLElement;
+  list: HTMLElement;
+  chat: ChatBox;
+}
+
+/** Painel do Host com a sala aberta: código, controles de vídeo, lista de jogadores e chat. */
+function hostPanel(c: string, p: HostPanelParts): (Node | null)[] {
+  const copy = el("button", { cls: "secondary", text: "Copiar" });
+  copy.onclick = () => {
+    navigator.clipboard.writeText(c).then(
+      () => (copy.textContent = "Copiado!"),
+      () => {},
+    );
+    setTimeout(() => (copy.textContent = "Copiar"), 1500);
+  };
+  const end = el("button", { cls: "secondary", text: "Encerrar" });
+  end.onclick = () => p.onEnd(end);
+  return [
+    el("div", { cls: "code", text: c }),
+    el("div", { cls: "row" }, copy, end),
+    p.status,
+    p.controls,
+    p.captureWarn,
+    p.overlayWarn ? el("div", { cls: "warn", text: OVERLAY_IN_VIDEO }) : null,
+    p.warn,
+    p.list,
+    p.chat.el,
+    emoteBar(sendEmote),
+  ];
 }
 
 async function guestFlow(name: string, code: string): Promise<void> {
@@ -312,6 +370,7 @@ async function guestFlow(name: string, code: string): Promise<void> {
   };
   const leave = () => {
     cancelled = true;
+    viewer?.dispose();
     cleanup();
     void goBack(session);
   };
@@ -523,7 +582,15 @@ function showViewer(aspect: number, leave: () => void): ViewerHandle {
   exit.style.cssText = "position:absolute;top:8px;right:8px;z-index:1";
   exit.onclick = leave;
   // Ordem de empilhamento: vídeo, aviso, bichinhos, botão.
-  const stage = el("div", { cls: "stage" }, video, status, canvas, exit);
+  let names = new Map<number, string>();
+  const chat = chatBox({
+    names: () => names,
+    onSend: sendChat,
+    visible: VISIBLE_LINES,
+    onDone: () => chat.input.blur(),
+  });
+  chat.el.className += " viewer-chat";
+  const stage = el("div", { cls: "stage" }, video, status, canvas, exit, chat.el, emoteBar(sendEmote));
   show("viewer", stage);
 
   const box = () => {
@@ -546,30 +613,23 @@ function showViewer(aspect: number, leave: () => void): ViewerHandle {
   layout();
 
   const renderer = startRenderer(canvas, { area: box });
-  let unlisten: UnlistenFn | null = null;
   let disposed = false;
-  void listen<Snapshot>("sim://snapshot", (e) => renderer.update(e.payload)).then((u) =>
-    disposed ? u() : (unlisten = u),
+  const unlistens: UnlistenFn[] = [];
+  const keep = (p: Promise<UnlistenFn>) =>
+    void p.then((u) => (disposed ? u() : unlistens.push(u)));
+  keep(listen<Snapshot>("sim://snapshot", (e) => renderer.update(e.payload)));
+  keep(
+    listenSocial({
+      chat: (m) => {
+        chat.push(m);
+        renderer.showChat(m.from, m.text);
+      },
+      emote: (m) => renderer.showEmote(m.from, m.emote),
+    }),
   );
 
-  // Só aqui o teclado vai para o Rust; `blur` solta o que estiver pressionado.
-  const pressed = new Set<string>();
-  const send = (code: string, down: boolean) => invoke("key_event", { code, down }).catch(() => {});
-  const onDown = (e: KeyboardEvent) => {
-    pressed.add(e.code);
-    send(e.code, true);
-  };
-  const onUp = (e: KeyboardEvent) => {
-    pressed.delete(e.code);
-    send(e.code, false);
-  };
-  const onBlur = () => {
-    for (const c of pressed) send(c, false);
-    pressed.clear();
-  };
-  window.addEventListener("keydown", onDown);
-  window.addEventListener("keyup", onUp);
-  window.addEventListener("blur", onBlur);
+  // Só aqui (e no painel do Host) o teclado vai para o Rust.
+  const unbindKeys = bindGameKeys({ input: chat.input, onKey: sendKey });
 
   // Aguardando até o primeiro `playing`; depois disso, quadros parados (ou `mute` da track,
   // como reforço) são o Host pausando.
@@ -609,7 +669,10 @@ function showViewer(aspect: number, leave: () => void): ViewerHandle {
   };
 
   return {
-    setRoster: (r) => renderer.setRoster(r),
+    setRoster: (r) => {
+      names = namesOf(r);
+      renderer.setRoster(r);
+    },
     setVideo: (t) => {
       if (disposed || t === track) return;
       detach();
@@ -628,12 +691,10 @@ function showViewer(aspect: number, leave: () => void): ViewerHandle {
       video.removeEventListener("playing", onPlaying);
       video.srcObject = null;
       renderer.stop();
-      unlisten?.();
+      unlistens.forEach((u) => u());
+      chat.dispose();
       window.removeEventListener("resize", layout);
-      window.removeEventListener("keydown", onDown);
-      window.removeEventListener("keyup", onUp);
-      window.removeEventListener("blur", onBlur);
-      onBlur();
+      unbindKeys();
     },
   };
 }

@@ -1,6 +1,6 @@
-use dm_protocol::InputFrame;
+use dm_protocol::{Emote, InputFrame};
 
-/// Teclas que o modo bichinho usa.
+/// Teclas que o modo bichinho e o viewer do convidado usam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
     W,
@@ -9,6 +9,8 @@ pub enum Key {
     D,
     Shift,
     Esc,
+    /// `1`–`6`, na ordem de `Emote::ALL`. Não é tecla de movimento.
+    Emote(Emote),
 }
 
 impl Key {
@@ -22,6 +24,10 @@ impl Key {
             0x44 => Some(Key::D),
             0x10 | 0xA0 | 0xA1 => Some(Key::Shift),
             0x1B => Some(Key::Esc),
+            0x31..=0x36 => Emote::ALL
+                .get(usize::from(vk - 0x31))
+                .copied()
+                .map(Key::Emote),
             _ => None,
         }
     }
@@ -35,6 +41,12 @@ impl Key {
             "KeyD" => Some(Key::D),
             "ShiftLeft" | "ShiftRight" => Some(Key::Shift),
             "Escape" => Some(Key::Esc),
+            "Digit1" => Some(Key::Emote(Emote::Heart)),
+            "Digit2" => Some(Key::Emote(Emote::Laugh)),
+            "Digit3" => Some(Key::Emote(Emote::Wow)),
+            "Digit4" => Some(Key::Emote(Emote::Angry)),
+            "Digit5" => Some(Key::Emote(Emote::Music)),
+            "Digit6" => Some(Key::Emote(Emote::Question)),
             _ => None,
         }
     }
@@ -57,7 +69,7 @@ impl KeyState {
             Key::S => self.s = down,
             Key::D => self.d = down,
             Key::Shift => self.shift = down,
-            Key::Esc => {}
+            Key::Esc | Key::Emote(_) => {}
         }
     }
 
@@ -73,6 +85,37 @@ impl KeyState {
     }
 }
 
+/// Teclas de emote seguradas. O emote sai só no key-down que vem depois de um key-up da
+/// mesma tecla: o autorepeat de quem segura não reenvia.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EmoteKeys(u8);
+
+impl EmoteKeys {
+    /// Registra a tecla e diz se é um key-down novo (a tecla estava solta).
+    pub fn press(&mut self, emote: Emote, down: bool) -> bool {
+        let bit = 1u8 << emote_index(emote);
+        let fresh = down && self.0 & bit == 0;
+        if down {
+            self.0 |= bit;
+        } else {
+            self.0 &= !bit;
+        }
+        fresh
+    }
+}
+
+/// Posição em `Emote::ALL` (0..6).
+fn emote_index(emote: Emote) -> u8 {
+    match emote {
+        Emote::Heart => 0,
+        Emote::Laugh => 1,
+        Emote::Wow => 2,
+        Emote::Angry => 3,
+        Emote::Music => 4,
+        Emote::Question => 5,
+    }
+}
+
 /// O que o hook faz com um evento de tecla.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -83,13 +126,14 @@ pub struct HookDecision {
     pub forward: bool,
 }
 
-fn swallow_bit(key: Key) -> u8 {
+fn swallow_bit(key: Key) -> u16 {
     match key {
         Key::W => 1,
         Key::A => 1 << 1,
         Key::S => 1 << 2,
         Key::D => 1 << 3,
         Key::Esc => 1 << 4,
+        Key::Emote(emote) => 1 << (5 + emote_index(emote)),
         Key::Shift => 0,
     }
 }
@@ -101,14 +145,15 @@ fn swallow_bit(key: Key) -> u8 {
 ///   tecla "presa".
 /// - Shift nunca é engolido (para não quebrar Ctrl+Shift+P e Shift+Alt+Tab); o pet só o lê.
 /// - Key-ups sempre vão ao `PetMode`, para o movimento não ficar preso.
+/// - Os dígitos `1`–`6` (emotes) seguem as mesmas regras de WASD.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn filter_key(
-    swallowed: u8,
+    swallowed: u16,
     pet_mode: bool,
     key: Option<Key>,
     down: bool,
     modifier_down: bool,
-) -> (u8, HookDecision) {
+) -> (u16, HookDecision) {
     let Some(key) = key else {
         return (
             swallowed,
@@ -160,6 +205,7 @@ pub fn filter_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dm_protocol::Emote;
 
     fn state(keys: &[Key]) -> KeyState {
         let mut s = KeyState::default();
@@ -195,7 +241,124 @@ mod tests {
         assert_eq!(Key::from_code("KeyZ"), None);
     }
 
-    fn on(state: u8, key: Key, down: bool, modifier: bool) -> (u8, HookDecision) {
+    #[test]
+    fn digits_are_emotes_in_order() {
+        let codes = ["Digit1", "Digit2", "Digit3", "Digit4", "Digit5", "Digit6"];
+        for (i, emote) in Emote::ALL.into_iter().enumerate() {
+            assert_eq!(Key::from_code(codes[i]), Some(Key::Emote(emote)));
+            assert_eq!(Key::from_vk(0x31 + i as u16), Some(Key::Emote(emote)));
+            assert_eq!(usize::from(emote_index(emote)), i);
+        }
+        assert_eq!(Key::from_code("Digit1"), Some(Key::Emote(Emote::Heart)));
+        assert_eq!(Key::from_code("Digit6"), Some(Key::Emote(Emote::Question)));
+        assert_eq!(Key::from_code("Digit7"), None);
+        assert_eq!(Key::from_code("Digit0"), None);
+        assert_eq!(Key::from_code("Numpad1"), None);
+        assert_eq!(Key::from_vk(0x30), None);
+        assert_eq!(Key::from_vk(0x37), None);
+    }
+
+    #[test]
+    fn emote_does_not_touch_movement() {
+        let mut s = state(&[Key::D, Key::Shift]);
+        let before = s;
+        for emote in Emote::ALL {
+            s.set(Key::Emote(emote), true);
+            s.set(Key::Emote(emote), false);
+        }
+        assert_eq!(s, before);
+        assert_eq!(state(&[Key::Emote(Emote::Heart)]), KeyState::default());
+    }
+
+    #[test]
+    fn emote_keys_fire_on_edge_only() {
+        let mut held = EmoteKeys::default();
+        assert!(held.press(Emote::Wow, true));
+        // Autorepeat: a tecla segue segurada, nada novo.
+        assert!(!held.press(Emote::Wow, true));
+        // Outra tecla é independente.
+        assert!(held.press(Emote::Heart, true));
+        assert!(!held.press(Emote::Wow, false));
+        assert!(held.press(Emote::Wow, true));
+        assert!(!held.press(Emote::Heart, true));
+        // Key-up sem key-down antes não faz nada de errado.
+        assert!(!held.press(Emote::Question, false));
+        for emote in Emote::ALL {
+            let mut held = EmoteKeys::default();
+            assert!(held.press(emote, true), "{emote:?}");
+            assert!(!held.press(emote, true), "{emote:?}");
+        }
+    }
+
+    #[test]
+    fn swallow_bits_are_distinct() {
+        let keys = [Key::W, Key::A, Key::S, Key::D, Key::Esc]
+            .into_iter()
+            .chain(Emote::ALL.into_iter().map(Key::Emote));
+        let mut all = 0u16;
+        for key in keys {
+            let bit = swallow_bit(key);
+            assert_eq!(bit.count_ones(), 1, "{key:?}");
+            assert_eq!(all & bit, 0, "{key:?}");
+            all |= bit;
+        }
+        assert_eq!(swallow_bit(Key::Shift), 0);
+    }
+
+    #[test]
+    fn hook_swallows_emote_keys_in_pet_mode() {
+        for emote in Emote::ALL {
+            let key = Key::Emote(emote);
+            // Modo ligado, sem modificador: engolida e repassada, como WASD.
+            let (s, d) = on(0b1_0101, key, true, false);
+            assert!(d.swallow && d.forward, "{emote:?}");
+            assert_eq!(s, 0b1_0101 | swallow_bit(key));
+            let (s, d) = on(s, key, false, false);
+            assert!(d.swallow && d.forward, "{emote:?}");
+            assert_eq!(s, 0b1_0101);
+        }
+        let key = Key::Emote(Emote::Wow);
+        // Com Ctrl/Alt/Win o dígito vai para o sistema; o key-up também.
+        let (s, d) = on(0, key, true, true);
+        assert!(!d.swallow && !d.forward);
+        let (s, d) = on(s, key, false, false);
+        assert!(!d.swallow && d.forward);
+        assert_eq!(s, 0);
+        // Modo desligado: o dígito é do sistema.
+        let (s, d) = filter_key(0, false, Some(key), true, false);
+        assert!(!d.swallow && !d.forward);
+        let (s, d) = filter_key(s, false, Some(key), false, false);
+        assert!(!d.swallow && d.forward);
+        assert_eq!(s, 0);
+        // Modo desligado no meio: o key-up do dígito engolido ainda é engolido.
+        let (s, _) = on(0, key, true, false);
+        let (s, d) = filter_key(s, false, Some(key), false, false);
+        assert!(d.swallow);
+        assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn swallowed_key_up_with_pet_mode_inactive_is_swallowed_forwarded_and_cleared() {
+        // O hook passa `pet_mode = false` quando o modo é desligado ou quando uma janela do
+        // próprio app ganha o foco com a tecla segurada: o key-up ainda é engolido (o sistema
+        // não viu o key-down), vai ao `PetMode` (o pet não fica andando) e o bit some.
+        let keys = [Key::W, Key::A, Key::S, Key::D, Key::Esc]
+            .into_iter()
+            .chain(Emote::ALL.map(Key::Emote));
+        for key in keys {
+            let other = swallow_bit(Key::A) | swallow_bit(Key::Emote(Emote::Question));
+            let held = other | swallow_bit(key);
+            let (s, d) = filter_key(held, false, Some(key), false, false);
+            assert!(d.swallow && d.forward, "{key:?}");
+            assert_eq!(s, held & !swallow_bit(key), "{key:?}");
+            // Com o bit já limpo, o key-down seguinte com o modo inativo é do sistema.
+            let (s2, d) = filter_key(s, false, Some(key), true, false);
+            assert!(!d.swallow && !d.forward, "{key:?}");
+            assert_eq!(s2, s, "{key:?}");
+        }
+    }
+
+    fn on(state: u16, key: Key, down: bool, modifier: bool) -> (u16, HookDecision) {
         filter_key(state, true, Some(key), down, modifier)
     }
 

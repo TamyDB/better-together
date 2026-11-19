@@ -31,6 +31,22 @@ Saldo da revisão final do M2. Registro curto do que ficou de fora, por marco.
 - `captureWarning` só é recalculado ao mudar o estado do vídeo (janela capturada
   redimensionada não atualiza o aviso).
 - "Compartilhar tela" sem trava com o seletor já aberto (ver o que o WebView2 faz no E2E).
-- `hostFlow` em `main-window.ts` cresceu: extrair o painel de vídeo do Host no M4.
+- ~~`hostFlow` em `main-window.ts` cresceu: extrair o painel de vídeo do Host no M4.~~ (M4: `hostPanel`)
 - `STALL_MS` do aviso de vídeo pausado precisa de calibração no E2E. Se der falso positivo
   com a tela parada, sinalizar a pausa pelo canal `events` no M4.
+
+## Saldo do M4
+
+Menores adiados pelas revisões por task (ainda não corrigidos):
+
+- `sanitize_chat`: `is_invisible` não cobre U+3164, U+115F e U+00AD (balão aparentemente vazio);
+  fixar as tags das variantes novas e a ordem de `Emote` no teste de wire; teste de corte
+  caindo em espaço.
+- `on_hello` usa `player.is_some()` em vez de `admitted()`; o flood usa `assert_eq` com 7; o
+  doc de `admitted()` cita vídeo.
+- Overlay dev solta só WASD/Shift no blur; `emote_send` do convidado com a mesma tecla física
+  segurada.
+- UI: `isComposing` no `Enter`; o botão de emote mantém o foco (`Espaço` reenvia); faltam testes
+  do foco por clique e do corte de `Enter` no keyup; o teste do nome do Host é fraco; mocks de
+  `listen`/renderer não detectam regressão.
+- `STALL_MS` e as demais pendências do M3 seguem para o E2E.

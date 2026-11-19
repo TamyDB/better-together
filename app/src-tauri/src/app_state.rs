@@ -3,7 +3,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
 
-use dm_protocol::{sanitize_name, Animal, Channel, InputFrame, RosterEntry, MAX_MESSAGE_BYTES};
+use dm_protocol::{
+    sanitize_name, Animal, Channel, Emote, InputFrame, RosterEntry, MAX_MESSAGE_BYTES,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::input::keys::Key;
@@ -13,6 +15,7 @@ use crate::runtime::host_loop::{HostHandle, SimSink};
 use crate::session::net::{NetIn, PeerId};
 
 const SESSION_ACTIVE: &str = "já existe uma sessão ativa";
+const NO_SESSION: &str = "nenhuma sessão ativa";
 
 /// O que havia ao encerrar a sessão (`AppState::end_session`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +109,12 @@ impl SimSink for PetSink {
     fn set_autonomous(&self, on: bool) {
         if let Some(sink) = lock(&self.0).as_ref() {
             sink.set_autonomous(on);
+        }
+    }
+
+    fn send_emote(&self, emote: Emote) {
+        if let Some(sink) = lock(&self.0).as_ref() {
+            sink.send_emote(emote);
         }
     }
 }
@@ -256,6 +265,30 @@ impl AppState {
         }
     }
 
+    /// Chat da UI. Ninguém mostra a própria mensagem: ela aparece no eco do Host.
+    pub fn chat_send(&self, text: String) -> Result<(), String> {
+        match &*lock(&self.mode) {
+            Mode::Host { handle, .. } => handle.chat(text),
+            Mode::Guest { handle } => handle.send(GuestCommand::Chat(text)),
+            Mode::Launcher => return Err(NO_SESSION.to_string()),
+        }
+        Ok(())
+    }
+
+    /// Botão de emote da UI. No Host vai direto à sessão (não depende do modo bichinho) e cai
+    /// no mesmo limite da tecla; no convidado é um toque na tecla (key-down e key-up).
+    pub fn emote_send(&self, emote: Emote) -> Result<(), String> {
+        match &*lock(&self.mode) {
+            Mode::Host { handle, .. } => handle.send_emote(emote),
+            Mode::Guest { handle } => {
+                handle.send(GuestCommand::Key(Key::Emote(emote), true));
+                handle.send(GuestCommand::Key(Key::Emote(emote), false));
+            }
+            Mode::Launcher => return Err(NO_SESSION.to_string()),
+        }
+        Ok(())
+    }
+
     pub fn guest_choose(&self, name: String, animal: Animal) -> Result<(), String> {
         match &*lock(&self.mode) {
             Mode::Guest { handle } => {
@@ -304,6 +337,7 @@ mod tests {
     use super::*;
     use crate::runtime::backlog::RecvBacklog;
     use crate::runtime::host_loop::HostCommand;
+    use dm_protocol::Emote;
     use std::sync::mpsc::{self, Receiver, TryRecvError};
 
     fn guest_handle() -> (GuestHandle, Receiver<GuestCommand>) {
@@ -529,6 +563,74 @@ mod tests {
             rx.try_recv().unwrap(),
             GuestCommand::Choose { .. }
         ));
+    }
+
+    #[test]
+    fn chat_and_emote_need_a_session() {
+        let state = AppState::new();
+        assert_eq!(
+            state.chat_send("oi".into()),
+            Err("nenhuma sessão ativa".to_string())
+        );
+        assert_eq!(
+            state.emote_send(Emote::Heart),
+            Err("nenhuma sessão ativa".to_string())
+        );
+    }
+
+    #[test]
+    fn chat_and_emote_go_to_host_loop() {
+        let (state, rx) = host_state();
+        state.chat_send("oi".into()).unwrap();
+        state.emote_send(Emote::Music).unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), HostCommand::Chat(t) if t == "oi"));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            HostCommand::Emote(Emote::Music)
+        ));
+        // O botão não depende do modo bichinho.
+        assert!(!state.pet_mode.is_on());
+    }
+
+    #[test]
+    fn chat_and_emote_go_to_guest_loop() {
+        let state = AppState::new();
+        let (handle, rx) = guest_handle();
+        state.enter_guest(|| handle).unwrap();
+        state.chat_send("oi".into()).unwrap();
+        state.emote_send(Emote::Music).unwrap();
+        assert!(matches!(rx.try_recv().unwrap(), GuestCommand::Chat(t) if t == "oi"));
+        // O botão é um toque na tecla: key-down e key-up.
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            GuestCommand::Key(Key::Emote(Emote::Music), true)
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            GuestCommand::Key(Key::Emote(Emote::Music), false)
+        ));
+    }
+
+    #[test]
+    fn host_pet_mode_emote_key_reaches_host_loop() {
+        let (state, rx) = host_state();
+        // Desligado: a tecla não vira emote.
+        state.key_event(Key::Emote(Emote::Wow), true);
+        state.key_event(Key::Emote(Emote::Wow), false);
+        assert!(rx.try_recv().is_err());
+        state.toggle_pet().unwrap();
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            HostCommand::HostAutonomous(false)
+        ));
+        state.key_event(Key::Emote(Emote::Wow), true);
+        state.key_event(Key::Emote(Emote::Wow), true);
+        state.key_event(Key::Emote(Emote::Wow), false);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            HostCommand::Emote(Emote::Wow)
+        ));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

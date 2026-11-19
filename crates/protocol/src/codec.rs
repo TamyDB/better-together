@@ -193,4 +193,84 @@ mod tests {
             })
         );
     }
+
+    #[test]
+    fn wire_order_unchanged() {
+        let snap = Snapshot {
+            tick: 0,
+            pets: vec![],
+        };
+        let guest_tag = |m: GuestMsg| encode(&m)[0];
+        let host_tag = |m: HostMsg| encode(&m)[0];
+        let hello = GuestMsg::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            name: String::new(),
+            desired_animal: Animal::Duck,
+            rejoin_token: 0,
+        };
+        assert_eq!(guest_tag(hello), 0);
+        assert_eq!(
+            guest_tag(GuestMsg::Input(InputFrame {
+                seq: 0,
+                move_x: 0,
+                move_y: 0,
+                run: false,
+            })),
+            1
+        );
+        let welcome = HostMsg::Welcome {
+            player_id: PlayerId(0),
+            animal: Animal::Duck,
+            snapshot: snap.clone(),
+            aspect: 1.0,
+        };
+        assert_eq!(host_tag(welcome), 0);
+        assert_eq!(host_tag(HostMsg::Lobby { taken: vec![] }), 1);
+        assert_eq!(host_tag(HostMsg::Roster(vec![])), 2);
+        assert_eq!(host_tag(HostMsg::Snapshot(snap)), 3);
+        assert_eq!(host_tag(HostMsg::Reject(RejectReason::RoomFull)), 4);
+        assert_eq!(
+            guest_tag(GuestMsg::Chat {
+                text: String::new()
+            }),
+            2
+        );
+        assert_eq!(guest_tag(GuestMsg::Emote(Emote::ALL[0])), 3);
+        let chat = HostMsg::Chat {
+            from: PlayerId(0),
+            text: String::new(),
+        };
+        assert_eq!(host_tag(chat), 5);
+        let emote = |e| HostMsg::Emote {
+            from: PlayerId(0),
+            emote: e,
+        };
+        assert_eq!(host_tag(emote(Emote::ALL[0])), 6);
+        // Cada emote vai como índice (na ordem de ALL) logo após a tag.
+        for (i, e) in Emote::ALL.into_iter().enumerate() {
+            assert_eq!(encode(&GuestMsg::Emote(e)), vec![3, i as u8]);
+        }
+    }
+
+    #[test]
+    fn roundtrip_chat_and_emote() {
+        let guest_chat = GuestMsg::Chat {
+            text: "olá, patinho! 🦆 こんにちは".into(),
+        };
+        assert_eq!(decode::<GuestMsg>(&encode(&guest_chat)), Ok(guest_chat));
+        let host_chat = HostMsg::Chat {
+            from: PlayerId(2),
+            text: "ação ✨".into(),
+        };
+        assert_eq!(decode::<HostMsg>(&encode(&host_chat)), Ok(host_chat));
+        for emote in Emote::ALL {
+            let g = GuestMsg::Emote(emote);
+            assert_eq!(decode::<GuestMsg>(&encode(&g)), Ok(g));
+            let h = HostMsg::Emote {
+                from: PlayerId(3),
+                emote,
+            };
+            assert_eq!(decode::<HostMsg>(&encode(&h)), Ok(h));
+        }
+    }
 }

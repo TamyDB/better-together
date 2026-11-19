@@ -1,18 +1,20 @@
-//! Hook de teclado low-level do Windows: lê WASD/Shift/Esc no modo bichinho
-//! sem que essas teclas cheguem aos apps do Host.
+//! Hook de teclado low-level do Windows: lê WASD/Shift/Esc e os emotes `1`–`6` no modo
+//! bichinho sem que essas teclas cheguem aos apps do Host.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 
 use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage, HC_ACTION,
-    HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_SYSKEYDOWN,
+    CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
+    SetWindowsHookExW, TranslateMessage, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL,
+    WM_KEYDOWN, WM_SYSKEYDOWN,
 };
 
 use super::keys::{filter_key, Key};
@@ -21,7 +23,7 @@ use crate::pet_mode::PetMode;
 // O callback do hook é `extern "system"` e não recebe contexto; o estado vive aqui.
 static MODE: OnceLock<Arc<PetMode>> = OnceLock::new();
 // Teclas cujo key-down foi engolido (ver `filter_key`). Só a thread do hook escreve.
-static SWALLOWED: AtomicU8 = AtomicU8::new(0);
+static SWALLOWED: AtomicU16 = AtomicU16::new(0);
 
 /// Instala o hook numa thread dedicada com o loop de mensagens que ele exige.
 pub fn install_keyboard_hook(mode: Arc<PetMode>) {
@@ -57,9 +59,13 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             let modifier =
                 pressed(VK_CONTROL) || pressed(VK_MENU) || pressed(VK_LWIN) || pressed(VK_RWIN);
 
+            // Numa janela do próprio app (ex.: o chat do painel) as teclas são do app: o
+            // key-down não é engolido nem vira movimento/emote. Key-ups seguem as regras de
+            // `filter_key` com o modo inativo: liberam o que foi engolido antes.
+            let active = mode.is_on() && !own_window_foreground();
             let (state, decision) = filter_key(
                 SWALLOWED.load(Ordering::Relaxed),
-                mode.is_on(),
+                active,
                 key,
                 down,
                 modifier,
@@ -74,4 +80,17 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         }
     }
     CallNextHookEx(HHOOK::default(), code, wparam, lparam)
+}
+
+/// A janela em primeiro plano é do próprio app (painel, overlay, viewer)?
+fn own_window_foreground() -> bool {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_invalid() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        pid == GetCurrentProcessId()
+    }
 }

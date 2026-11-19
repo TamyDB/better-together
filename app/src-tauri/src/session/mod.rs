@@ -4,6 +4,7 @@ pub mod guest;
 pub mod host;
 pub mod interp;
 pub mod net;
+pub mod rate;
 
 use dm_protocol::PlayerId;
 
