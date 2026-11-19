@@ -1,5 +1,5 @@
 import { normalizeCode } from "../net/signaling";
-import type { Animal } from "../types";
+import type { Animal, LastJoin } from "../types";
 
 export const ANIMAL_LABEL: Record<Animal, string> = {
   duck: "Pato",
@@ -23,18 +23,18 @@ export function rejectMessage(reason: RejectReason): string {
   }
 }
 
-/** Escolha guardada da última entrada (`sessionStorage`, dado não confiável) se for da mesma sala. */
-export function rejoinChoice(last: unknown, code: string): { name: string; animal: Animal } | null {
+/** Escolha guardada da última entrada (vem do IPC, mas validada) se for da mesma sala. */
+export function rejoinChoice(last: LastJoin | null, code: string): { name: string; animal: Animal } | null {
   if (typeof last !== "object" || last === null) return null;
-  const { code: c, name, animal } = last as Record<string, unknown>;
+  const { code: c, name, animal } = last as unknown as Record<string, unknown>;
   if (c !== code || typeof name !== "string") return null;
   if (typeof animal !== "string" || !Object.hasOwn(ANIMAL_LABEL, animal)) return null;
   return { name, animal: animal as Animal };
 }
 
-/** Código da última sala (`sessionStorage`, dado não confiável), normalizado. */
-export function lastCode(last: unknown): string | null {
+/** Código da última sala (vem do IPC, mas validada), normalizado. */
+export function lastCode(last: LastJoin | null): string | null {
   if (typeof last !== "object" || last === null) return null;
-  const { code } = last as Record<string, unknown>;
+  const { code } = last as unknown as Record<string, unknown>;
   return typeof code === "string" ? normalizeCode(code) : null;
 }

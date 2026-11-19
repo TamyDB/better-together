@@ -9,7 +9,18 @@ export function startOverlay(): void {
   const renderer = startRenderer(canvas);
 
   void listen<Snapshot>("sim://snapshot", (e) => renderer.update(e.payload));
-  void listen<RosterEntry[]>("session://roster", (e) => renderer.setRoster(e.payload));
+  // O listen vem antes do invoke; o evento (mais novo) nunca é sobrescrito pela resposta.
+  let gotRosterEvent = false;
+  void listen<RosterEntry[]>("session://roster", (e) => {
+    gotRosterEvent = true;
+    renderer.setRoster(e.payload);
+  }).then(() =>
+    invoke<RosterEntry[]>("host_roster")
+      .then((roster) => {
+        if (!gotRosterEvent) renderer.setRoster(roster);
+      })
+      .catch(() => {}),
+  );
 
   // Modo dev (DM_DEV_WINDOW=1): a janela tem foco, então o teclado vem da webview.
   // Na overlay normal ela nunca recebe foco e o hook do Windows cuida do teclado.

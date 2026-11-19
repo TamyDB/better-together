@@ -6,6 +6,8 @@ use tauri::{
     WebviewWindowBuilder,
 };
 
+use crate::capture;
+
 pub const OVERLAY_LABEL: &str = "overlay";
 pub const MAIN_LABEL: &str = "main";
 const MAIN_URL: &str = "index.html?view=main";
@@ -15,7 +17,7 @@ pub const LAUNCHER_SIZE: (f64, f64) = (420.0, 560.0);
 /// Janela `main` como viewer do convidado.
 pub const VIEWER_SIZE: (f64, f64) = (1280.0, 720.0);
 /// Janela `main` como painel do Host.
-pub const PANEL_SIZE: (f64, f64) = (360.0, 260.0);
+pub const PANEL_SIZE: (f64, f64) = (360.0, 340.0);
 const OVERLAY_GONE_POLLS: u32 = 25;
 const OVERLAY_GONE_POLL: Duration = Duration::from_millis(20);
 const DEV_SIZE: (f64, f64) = (1280.0, 720.0);
@@ -61,22 +63,37 @@ pub fn wait_overlay_gone(app: &AppHandle) {
     }
 }
 
+/// O que a sessão do Host precisa saber da overlay criada.
+pub struct OverlayInfo {
+    /// Proporção (largura/altura) da área coberta.
+    pub aspect: f32,
+    /// A overlay ficou fora da captura de tela (os bichinhos não vão no vídeo).
+    pub excluded: bool,
+}
+
 /// Cria a janela da overlay e devolve a proporção (largura/altura) da área coberta,
-/// que a simulação usa para manter o movimento isotrópico.
+/// que a simulação usa para manter o movimento isotrópico, e se ela ficou fora da captura.
 ///
 /// Normal: transparente, sem borda, sempre no topo, click-through, sobre o monitor primário.
 /// Dev (`DM_DEV_WINDOW=1`): janela comum 1280×720 focável, para testar no Linux.
-pub fn setup_overlay(app: &AppHandle, dev_window: bool) -> tauri::Result<f32> {
+/// Nos dois casos a janela nasce oculta e só aparece depois de sair da captura.
+pub fn setup_overlay(app: &AppHandle, dev_window: bool) -> tauri::Result<OverlayInfo> {
     let builder =
         WebviewWindowBuilder::new(app, OVERLAY_LABEL, WebviewUrl::App(OVERLAY_URL.into()))
-            .title("Better Together");
+            .title("Better Together")
+            .visible(false);
 
     if dev_window {
-        builder
+        let window = builder
             .inner_size(DEV_SIZE.0, DEV_SIZE.1)
             .resizable(false)
             .build()?;
-        return Ok((DEV_SIZE.0 / DEV_SIZE.1) as f32);
+        let excluded = capture::exclude_from_capture(&window);
+        window.show()?;
+        return Ok(OverlayInfo {
+            aspect: (DEV_SIZE.0 / DEV_SIZE.1) as f32,
+            excluded,
+        });
     }
 
     let window = builder
@@ -87,13 +104,16 @@ pub fn setup_overlay(app: &AppHandle, dev_window: bool) -> tauri::Result<f32> {
         .resizable(false)
         .shadow(false)
         .focused(false)
-        .visible(false)
         .build()?;
+    let excluded = capture::exclude_from_capture(&window);
 
     let Some(monitor) = app.primary_monitor()? else {
         log::warn!("monitor primário não encontrado; usando proporção padrão");
         window.show()?;
-        return Ok(FALLBACK_ASPECT);
+        return Ok(OverlayInfo {
+            aspect: FALLBACK_ASPECT,
+            excluded,
+        });
     };
     let (pos, size) = (*monitor.position(), *monitor.size());
     window.set_position(PhysicalPosition::new(pos.x, pos.y))?;
@@ -102,11 +122,12 @@ pub fn setup_overlay(app: &AppHandle, dev_window: bool) -> tauri::Result<f32> {
     window.show()?;
 
     let aspect = size.width as f32 / size.height as f32;
-    Ok(if aspect.is_finite() && aspect > 0.0 {
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
         aspect
     } else {
         FALLBACK_ASPECT
-    })
+    };
+    Ok(OverlayInfo { aspect, excluded })
 }
 
 pub fn dev_window_enabled() -> bool {

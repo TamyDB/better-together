@@ -214,6 +214,7 @@ dependencies = [
  "env_logger",
  "log",
  "rand 0.9.5",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "tauri",

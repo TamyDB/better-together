@@ -1,23 +1,55 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { startGuestNet, startHostNet, type NetConfig, type NetSession } from "../net/bridge";
+import {
+  startGuestNet,
+  startHostNet,
+  type HostNetSession,
+  type NetConfig,
+  type NetSession,
+} from "../net/bridge";
 import { normalizeCode } from "../net/signaling";
 import { CONNECT_TIMEOUT_MS, deadline } from "../net/timeout";
+import {
+  CAPTURE_OPTIONS,
+  captureWarning,
+  GUEST_PAUSED_TEXT,
+  GUEST_WAITING_TEXT,
+  hostVideoText,
+  STALL_MS,
+  type VideoState,
+} from "../net/video";
 import { startRenderer } from "../render/canvas";
 import { fitRect } from "../render/fit";
 import { LOOK } from "../render/placeholder";
-import type { Animal, RosterEntry, Snapshot } from "../types";
+import type { Animal, LastJoin, RosterEntry, Snapshot } from "../types";
+import { HostVideo } from "./host-video";
 import { ANIMAL_LABEL, lastCode, rejectMessage, rejoinChoice, type RejectReason } from "./labels";
 
 const ANIMALS = Object.keys(ANIMAL_LABEL) as Animal[];
 const VIEWER_W = 1280;
 const VIEWER_H = 720;
-/** Última entrada bem-sucedida; sobrevive ao reload do "Voltar" e morre com o app, como o token. */
-const LAST_KEY = "bt.last";
+const OVERLAY_IN_VIDEO =
+  "Seu Windows não esconde os bichinhos do vídeo: eles vão aparecer duplicados";
+/** Intervalo da contagem de quadros quando não há `requestVideoFrameCallback`. */
+const FRAME_POLL_MS = 500;
 
-function readLast(): unknown {
+/** Resposta do `host_start`. */
+interface HostStarted {
+  aspect: number;
+  overlay_in_video: boolean;
+}
+
+/** Abre o seletor de tela; sem `navigator.mediaDevices` (WebKitGTK) vira recusa, nunca exceção. */
+function captureScreen(): Promise<MediaStream> {
+  const media = globalThis.navigator?.mediaDevices;
+  if (!media?.getDisplayMedia) return Promise.reject(new Error("Captura de tela indisponível"));
+  return media.getDisplayMedia(CAPTURE_OPTIONS);
+}
+
+/** Lembrança da última entrada, guardada pelo Rust; qualquer falha vira "sem lembrança". */
+async function readLast(): Promise<LastJoin | null> {
   try {
-    return JSON.parse(sessionStorage.getItem(LAST_KEY) ?? "null");
+    return (await invoke<LastJoin | null>("last_join")) ?? null;
   } catch {
     return null;
   }
@@ -60,8 +92,9 @@ function show(cls: string, ...children: (Node | null)[]): HTMLElement {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Encerra a sessão (stop antes do reset) e recarrega para o launcher. */
-async function goBack(session: NetSession | null): Promise<void> {
+/** Encerra a sessão (captura, depois stop, depois reset) e recarrega para o launcher. */
+async function goBack(session: NetSession | null, video: HostVideo | null = null): Promise<void> {
+  video?.dispose();
   try {
     await session?.stop();
   } catch {
@@ -119,11 +152,13 @@ function launcher(): void {
   const join = el("button", { text: "Entrar" });
   join.disabled = true;
   code.oninput = () => (join.disabled = normalizeCode(code.value) === null);
-  const saved = lastCode(readLast());
-  if (saved) {
-    code.value = saved;
-    join.disabled = false;
-  }
+  void readLast().then((last) => {
+    const saved = lastCode(last);
+    if (saved && !code.value) {
+      code.value = saved;
+      join.disabled = false;
+    }
+  });
 
   const nick = () => name.value.trim() || "Jogador";
   create.onclick = () => animal && void hostFlow(nick(), animal);
@@ -148,11 +183,51 @@ function launcher(): void {
 }
 
 async function hostFlow(name: string, animal: Animal): Promise<void> {
+  let session: HostNetSession | null = null;
+  // Última track entregue por `HostVideo`: vai no `startHostNet` e, depois dele, por `setVideo`.
+  let sent: MediaStreamTrack | null = null;
+  let state: VideoState = "none";
+  let aspect = NaN;
+  const status = el("div", { cls: "muted" });
+  const controls = el("div", { cls: "row" });
+  const captureWarn = el("div", { cls: "warn" });
+  const video: HostVideo = new HostVideo(
+    captureScreen,
+    (t) => {
+      sent = t;
+      session?.setVideo(t);
+    },
+    (s) => {
+      state = s;
+      renderVideo();
+    },
+  );
+  const share = el("button", { cls: "secondary" });
+  // Síncrono no clique: o seletor exige o gesto do usuário.
+  share.onclick = () => void video.share();
+  const toggle = el("button", { cls: "secondary" });
+  toggle.onclick = () => (state === "live" ? video.pause() : video.resume());
+  const renderVideo = () => {
+    status.textContent = hostVideoText(state);
+    const has = state === "live" || state === "paused";
+    toggle.textContent = state === "live" ? "Pausar vídeo" : "Retomar vídeo";
+    share.textContent = has ? "Trocar tela" : "Compartilhar tela";
+    controls.replaceChildren(...(has ? [toggle, share] : [share]));
+    const settings = video.settings();
+    captureWarn.textContent = (settings && captureWarning(settings, aspect)) ?? "";
+  };
+
+  // Antes de qualquer `await`, ainda dentro do clique em "Criar sala".
+  void video.share();
+  // F5 ou fechar a janela também apaga o indicador de compartilhamento.
+  window.addEventListener("pagehide", () => video.dispose());
+
   show("center", el("h1", { text: "Criando sala..." }));
-  let session: NetSession | null = null;
   const unlisten: UnlistenFn[] = [];
   try {
-    await invoke("host_start", { name, animal });
+    const started = await invoke<HostStarted>("host_start", { name, animal });
+    aspect = started.aspect;
+    renderVideo();
     const cfg = await invoke<NetConfig>("net_config");
 
     // O roster só sai quando alguém entra/sai: até lá, mostra o próprio Host.
@@ -193,17 +268,31 @@ async function hostFlow(name: string, animal: Animal): Promise<void> {
         end.onclick = () => {
           end.disabled = true;
           unlisten.forEach((u) => u());
-          void goBack(session);
+          void goBack(session, video);
         };
         renderRoster();
-        show("", el("div", { cls: "code", text: c }), el("div", { cls: "row" }, copy, end), warn, list);
+        show(
+          "",
+          el("div", { cls: "code", text: c }),
+          el("div", { cls: "row" }, copy, end),
+          status,
+          controls,
+          captureWarn,
+          started.overlay_in_video ? el("div", { cls: "warn", text: OVERLAY_IN_VIDEO }) : null,
+          warn,
+          list,
+        );
       },
       () => {
         warn.textContent = "Conexão com o servidor perdida: novos amigos não conseguem entrar";
       },
+      sent,
     );
+    // O seletor pode ter respondido durante o `startHostNet`.
+    session.setVideo(sent);
   } catch (e) {
     unlisten.forEach((u) => u());
+    video.dispose();
     backScreen("Não foi possível criar a sala", errorText(e), session);
   }
 }
@@ -236,6 +325,8 @@ async function guestFlow(name: string, code: string): Promise<void> {
   let inViewer = false;
   let roster: RosterEntry[] = [];
   let viewer = null as ViewerHandle | null;
+  // A track do Host pode chegar antes do `welcome`: guardada até o viewer abrir.
+  let hostVideo: MediaStreamTrack | null = null;
   // Reconexão automática: uma única tentativa, sem passar pelos cartões (sala cheia também vale).
   let autoTried = false;
   let autoPending = false;
@@ -283,17 +374,25 @@ async function guestFlow(name: string, code: string): Promise<void> {
         taken = e.payload.taken;
         if (inViewer) return;
         if (!autoTried) {
+          // Marcado antes do await: um segundo lobby durante a leitura não tenta de novo.
           autoTried = true;
-          const again = rejoinChoice(readLast(), code);
-          if (again) {
-            autoPending = true;
+          autoPending = true;
+          void readLast().then((last) => {
+            // Cancelado, recusado ou já no viewer enquanto lia: nada a fazer.
+            if (cancelled || !autoPending || inViewer) return;
+            const again = rejoinChoice(last, code);
+            if (!again) {
+              autoPending = false;
+              lobby();
+              return;
+            }
             sentName = again.name;
             invoke("guest_choose", again).catch(() => {
               autoPending = false;
               lobby();
             });
-            return;
-          }
+          });
+          return;
         }
         if (!autoPending) lobby();
       }),
@@ -301,11 +400,12 @@ async function guestFlow(name: string, code: string): Promise<void> {
         firstReply.settle();
         inViewer = true;
         autoPending = false;
-        sessionStorage.setItem(LAST_KEY, JSON.stringify({ code, name: sentName, animal: e.payload.animal }));
+        invoke("remember_join", { code, name: sentName, animal: e.payload.animal }).catch(() => {});
         viewer?.dispose();
         invoke("enter_viewer").catch(() => {});
         viewer = showViewer(e.payload.aspect, leave);
         viewer.setRoster(roster);
+        if (hostVideo) viewer.setVideo(hostVideo);
       }),
       await listen<{ reason: RejectReason }>("session://rejected", (e) => {
         firstReply.settle();
@@ -321,14 +421,19 @@ async function guestFlow(name: string, code: string): Promise<void> {
       await listen("session://host-lost", () => {
         viewer?.dispose();
         viewer = null;
+        hostVideo = null;
         cleanup();
         backScreen("O Host saiu", null, session);
       }),
     );
-    session = await startGuestNet(cfg, code);
+    session = await startGuestNet(cfg, code, (t) => {
+      hostVideo = t;
+      viewer?.setVideo(t);
+    });
     if (cancelled) await session.stop();
     firstReply.arm();
   } catch (e) {
+    hostVideo = null;
     if (cancelled) return; // a própria UI cancelou: a rejeição é esperada
     viewer?.dispose();
     cleanup();
@@ -336,19 +441,89 @@ async function guestFlow(name: string, code: string): Promise<void> {
   }
 }
 
+/**
+ * Vigia os quadros do `<video>`: sem quadro novo por `STALL_MS` chama `onStall`; cada quadro
+ * chama `onFrame`. No Chromium a track remota não emite `mute` quando o Host pausa
+ * (`replaceTrack(null)` sem renegociar): o vídeo parado é o sinal. Sem como contar quadros,
+ * não vigia. Devolve o cancelamento, que não deixa timer vivo.
+ */
+function watchFrames(video: HTMLVideoElement, onFrame: () => void, onStall: () => void): () => void {
+  let stall: ReturnType<typeof setTimeout> | null = null;
+  const clearStall = () => {
+    if (stall !== null) clearTimeout(stall);
+    stall = null;
+  };
+  const arm = () => {
+    clearStall();
+    stall = setTimeout(() => {
+      stall = null;
+      onStall();
+    }, STALL_MS);
+  };
+  const frame = () => {
+    arm();
+    onFrame();
+  };
+
+  if (typeof video.requestVideoFrameCallback === "function") {
+    let stopped = false;
+    let handle = 0;
+    const next = () => {
+      handle = video.requestVideoFrameCallback(() => {
+        if (stopped) return;
+        frame();
+        next();
+      });
+    };
+    arm();
+    next();
+    return () => {
+      stopped = true;
+      video.cancelVideoFrameCallback?.(handle);
+      clearStall();
+    };
+  }
+  if (typeof video.getVideoPlaybackQuality === "function") {
+    const count = () => video.getVideoPlaybackQuality().totalVideoFrames;
+    let seen = count();
+    const poll = setInterval(() => {
+      const n = count();
+      if (n !== seen) {
+        seen = n;
+        frame();
+      }
+    }, FRAME_POLL_MS);
+    arm();
+    return () => {
+      clearInterval(poll);
+      clearStall();
+    };
+  }
+  return () => {};
+}
+
 interface ViewerHandle {
   setRoster(r: RosterEntry[]): void;
+  /** Liga a track do Host ao `<video>`; a mesma track pode ser religada num viewer novo. */
+  setVideo(t: MediaStreamTrack): void;
   dispose(): void;
 }
 
 /** Viewer do convidado: 1280x720 de referência, letterbox no `aspect` do Host. */
 function showViewer(aspect: number, leave: () => void): ViewerHandle {
   const canvas = document.createElement("canvas");
-  const video = el("div", { cls: "video", text: "O vídeo do Host chega no M3" });
+  // `muted` + `playsinline` como atributo e propriedade: autoplay sem gesto do usuário.
+  const video = el("video", { cls: "video" });
+  for (const a of ["autoplay", "muted", "playsinline"]) video.setAttribute(a, "");
+  video.autoplay = true;
+  video.muted = true;
+  video.playsInline = true;
+  const status = el("div", { cls: "video-status", text: GUEST_WAITING_TEXT });
   const exit = el("button", { cls: "secondary", text: "Sair" });
   exit.style.cssText = "position:absolute;top:8px;right:8px;z-index:1";
   exit.onclick = leave;
-  const stage = el("div", { cls: "stage" }, video, canvas, exit);
+  // Ordem de empilhamento: vídeo, aviso, bichinhos, botão.
+  const stage = el("div", { cls: "stage" }, video, status, canvas, exit);
   show("viewer", stage);
 
   const box = () => {
@@ -356,14 +531,16 @@ function showViewer(aspect: number, leave: () => void): ViewerHandle {
     const h = stage.clientHeight || VIEWER_H;
     return fitRect(w, h, aspect > 0 && isFinite(aspect) ? aspect : 16 / 9);
   };
+  // O vídeo (`object-fit: fill`) ocupa o mesmo retângulo dos bichinhos.
   const layout = () => {
     const r = box();
-    Object.assign(video.style, {
-      left: `${r.x}px`,
-      top: `${r.y}px`,
-      width: `${r.w}px`,
-      height: `${r.h}px`,
-    });
+    for (const e of [video, status])
+      Object.assign(e.style, {
+        left: `${r.x}px`,
+        top: `${r.y}px`,
+        width: `${r.w}px`,
+        height: `${r.h}px`,
+      });
   };
   window.addEventListener("resize", layout);
   layout();
@@ -394,10 +571,62 @@ function showViewer(aspect: number, leave: () => void): ViewerHandle {
   window.addEventListener("keyup", onUp);
   window.addEventListener("blur", onBlur);
 
+  // Aguardando até o primeiro `playing`; depois disso, quadros parados (ou `mute` da track,
+  // como reforço) são o Host pausando.
+  let track: MediaStreamTrack | null = null;
+  let played = false;
+  let unwatch: (() => void) | null = null;
+  const showStatus = (text: string | null) => {
+    status.hidden = text === null;
+    if (text !== null) status.textContent = text;
+  };
+  const stopWatch = () => {
+    unwatch?.();
+    unwatch = null;
+  };
+  const onPlaying = () => {
+    played = true;
+    showStatus(null);
+    unwatch ??= watchFrames(
+      video,
+      () => {
+        if (!status.hidden) showStatus(null);
+      },
+      () => showStatus(GUEST_PAUSED_TEXT),
+    );
+  };
+  const onMute = () => {
+    if (played) showStatus(GUEST_PAUSED_TEXT);
+  };
+  const onUnmute = () => {
+    if (played) showStatus(null);
+  };
+  video.addEventListener("playing", onPlaying);
+  const detach = () => {
+    track?.removeEventListener("mute", onMute);
+    track?.removeEventListener("unmute", onUnmute);
+    track = null;
+  };
+
   return {
     setRoster: (r) => renderer.setRoster(r),
+    setVideo: (t) => {
+      if (disposed || t === track) return;
+      detach();
+      stopWatch();
+      track = t;
+      played = false;
+      showStatus(GUEST_WAITING_TEXT);
+      t.addEventListener("mute", onMute);
+      t.addEventListener("unmute", onUnmute);
+      video.srcObject = new MediaStream([t]);
+    },
     dispose: () => {
       disposed = true;
+      detach();
+      stopWatch();
+      video.removeEventListener("playing", onPlaying);
+      video.srcObject = null;
       renderer.stop();
       unlisten?.();
       window.removeEventListener("resize", layout);

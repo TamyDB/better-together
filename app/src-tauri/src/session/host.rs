@@ -284,25 +284,33 @@ impl HostSession {
     }
 
     /// Religa o jogador a um novo peer, com o animal e o nome originais. Se dormia, acorda o
-    /// pet; se ainda estava ligado a outro peer, esse peer é dado como morto e esquecido.
+    /// pet; se ainda estava ligado a outro peer, esse peer é dado como morto, esquecido e
+    /// perde o vídeo.
     fn rejoin(&mut self, peer: PeerId, id: PlayerId) -> Vec<Out> {
         let Some(player) = self.players.get_mut(&id) else {
             return Vec::new();
         };
+        let mut out = Vec::new();
         if let Some(old) = player.peer.replace(peer) {
             log::debug!(
                 "peer {old} substituído pelo peer {peer} no jogador {}",
                 id.0
             );
             self.peers.remove(&old);
+            out.push(Out::Video {
+                peer: old,
+                on: false,
+            });
         }
         if player.asleep_since.take().is_some() {
             self.world.set_asleep(id, false);
         }
-        self.bind(peer, id)
+        out.extend(self.bind(peer, id));
+        out
     }
 
-    /// Associa o peer ao jogador, manda o `Welcome` e anuncia a mudança.
+    /// Associa o peer ao jogador, manda o `Welcome`, liga o vídeo e anuncia a mudança. Só
+    /// peers admitidos chegam aqui: lobby e `Reject` nunca recebem a tela do Host.
     fn bind(&mut self, peer: PeerId, id: PlayerId) -> Vec<Out> {
         if let Some(state) = self.peers.get_mut(&peer) {
             state.player = Some(id);
@@ -316,7 +324,10 @@ impl HostSession {
             snapshot: self.world.snapshot(),
             aspect: self.world.aspect(),
         };
-        let mut out = vec![send(peer, Channel::Events, &welcome)];
+        let mut out = vec![
+            send(peer, Channel::Events, &welcome),
+            Out::Video { peer, on: true },
+        ];
         out.extend(self.players_changed());
         out
     }
@@ -465,7 +476,7 @@ mod tests {
                     channel,
                     bytes,
                 } => Some((*peer, *channel, decode::<HostMsg>(bytes).unwrap())),
-                Out::Roster(_) => None,
+                Out::Roster(_) | Out::Video { .. } => None,
             })
             .collect()
     }
@@ -473,8 +484,18 @@ mod tests {
     fn local_roster(outs: &[Out]) -> Option<Vec<RosterEntry>> {
         outs.iter().rev().find_map(|o| match o {
             Out::Roster(r) => Some(r.clone()),
-            Out::Send { .. } => None,
+            Out::Send { .. } | Out::Video { .. } => None,
         })
+    }
+
+    /// Só os `Video`, na ordem: `(peer, on)`.
+    fn videos(outs: &[Out]) -> Vec<(PeerId, bool)> {
+        outs.iter()
+            .filter_map(|o| match o {
+                Out::Video { peer, on } => Some((*peer, *on)),
+                Out::Send { .. } | Out::Roster(_) => None,
+            })
+            .collect()
     }
 
     fn to_peer(outs: &[Out], peer: PeerId) -> Vec<(Channel, HostMsg)> {
@@ -930,5 +951,74 @@ mod tests {
         }
         assert!(pet(&s, 0).unwrap().pos.x < x0);
         assert_eq!(s.roster()[0].animal, Animal::Duck);
+    }
+
+    #[test]
+    fn welcome_turns_video_on() {
+        let mut s = session();
+        let now = Instant::now();
+        assert!(videos(&s.handle(NetIn::PeerOpened(7), now)).is_empty());
+        let outs = s.handle(
+            recv(7, Channel::Events, hello("Ana", Animal::Capybara, 1)),
+            now,
+        );
+        assert_eq!(welcome_of(&outs, 7), Some((PlayerId(1), Animal::Capybara)));
+        assert_eq!(videos(&outs), vec![(7, true)]);
+
+        // Hello repetido, input e tick não mexem no vídeo.
+        let again = s.handle(
+            recv(7, Channel::Events, hello("Ana", Animal::Horse, 1)),
+            now,
+        );
+        assert!(videos(&again).is_empty());
+        let mut ticks = Vec::new();
+        for _ in 0..3 {
+            ticks.extend(s.tick(now));
+        }
+        assert!(videos(&ticks).is_empty());
+    }
+
+    #[test]
+    fn rejected_hello_has_no_video() {
+        let mut s = session();
+        let now = Instant::now();
+        s.handle(NetIn::PeerOpened(7), now);
+        let wrong_version = s.handle(
+            recv(7, Channel::Events, hello_v(99, "A", Animal::Horse, 1)),
+            now,
+        );
+        assert!(videos(&wrong_version).is_empty());
+        // O Pato é do Host.
+        let taken = s.handle(recv(7, Channel::Events, hello("A", Animal::Duck, 1)), now);
+        assert_eq!(
+            to_peer(&taken, 7)[0],
+            (Channel::Events, HostMsg::Reject(RejectReason::AnimalTaken))
+        );
+        assert!(videos(&taken).is_empty());
+        // Lixo e canal errado também não.
+        assert!(videos(&s.handle(recv(7, Channel::Events, vec![0xFF; 8]), now)).is_empty());
+
+        join(&mut s, 1, Animal::Capybara, 2, now);
+        join(&mut s, 2, Animal::Horse, 3, now);
+        join(&mut s, 3, Animal::Chicken, 4, now);
+        let full = join(&mut s, 4, Animal::Horse, 5, now);
+        assert!(videos(&full).is_empty());
+    }
+
+    #[test]
+    fn rejoin_moves_video_to_new_peer() {
+        let mut s = session();
+        let now = Instant::now();
+        join(&mut s, 7, Animal::Capybara, 42, now);
+
+        // Peer antigo ainda vivo: o vídeo sai dele e vai para o novo.
+        let outs = join(&mut s, 9, Animal::Horse, 42, now);
+        assert_eq!(welcome_of(&outs, 9), Some((PlayerId(1), Animal::Capybara)));
+        assert_eq!(videos(&outs), vec![(7, false), (9, true)]);
+
+        // Peer caído antes do rejoin: não há o que cortar.
+        s.handle(NetIn::PeerClosed(9), now);
+        let outs = join(&mut s, 11, Animal::Horse, 42, now + Duration::from_secs(5));
+        assert_eq!(videos(&outs), vec![(11, true)]);
     }
 }

@@ -38,6 +38,7 @@ button.secondary { background: #2a3248; }
 .code { font-size: 36px; font-weight: 800; letter-spacing: 2px; text-align: center; }
 .error { color: #ff8a8a; }
 .warn { color: #ffd479; }
+.warn:empty { display: none; }
 .muted { color: #9aa6bf; }
 ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 li { display: flex; align-items: center; gap: 8px; }
@@ -47,7 +48,10 @@ li .pet { width: 24px; height: 24px; font-size: 12px; border-width: 2px; }
 #app.viewer { padding: 0; gap: 0; background: #000; }
 .stage { position: relative; flex: 1; overflow: hidden; }
 .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
-.video {
-  position: absolute; background: #1d2330; color: #5d6985;
-  display: flex; align-items: center; justify-content: center;
+/* Mesmo retângulo do canvas (fitRect): `fill` mantém os bichinhos sobre o ponto certo da imagem. */
+.video { position: absolute; display: block; background: #1d2330; object-fit: fill; }
+.video-status {
+  position: absolute; display: flex; align-items: center; justify-content: center;
+  color: #9aa6bf; background: rgba(22, 26, 36, 0.6); pointer-events: none;
 }
+.video-status[hidden] { display: none; }
